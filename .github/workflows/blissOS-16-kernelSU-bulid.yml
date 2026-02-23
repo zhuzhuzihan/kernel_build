@@ -152,11 +152,10 @@ jobs:
           echo "=== 应用 KernelSU 补丁 ==="
           cd kernel
           
-          # 应用所有补丁文件
-          for patch_file in ${{ github.workspace }}/patch/*.diff; do
-            echo "应用补丁: $patch_file"
-            git apply --check "$patch_file" && git apply "$patch_file" || echo "补丁 $patch_file 可能已应用或失败"
-          done
+          # 应用补丁文件
+          patch_file="${{ github.workspace }}/patch/patch.diff"
+          echo "应用补丁: $patch_file"
+          git apply --check "$patch_file" && git apply "$patch_file" || echo "补丁可能已应用或失败"
           
           echo "=== 补丁应用完成 ==="
 
