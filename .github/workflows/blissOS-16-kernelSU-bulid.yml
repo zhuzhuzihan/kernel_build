@@ -223,6 +223,9 @@ jobs:
           ./scripts/config --enable CONFIG_TP_SMAPI
           ./scripts/config --enable CONFIG_XPAD
           
+          # 自动接受所有新配置项的默认值，避免交互式提示
+          make LLVM=1 olddefconfig
+          
           echo "=== 内核配置完成 ==="
 
       - name: Build kernel
