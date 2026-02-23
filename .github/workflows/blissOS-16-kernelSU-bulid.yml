@@ -118,9 +118,40 @@ jobs:
         run: |
           echo "=== 克隆内核驱动 ==="
           cd kernel
-          git clone https://github.com/android-generic/external_kernel-drivers.git -b 6.1 --depth=1 drivers/external
+          git clone https://github.com/android-generic/external_kernel-drivers.git -b 6.1 drivers/external
+          cd drivers/external
+          
+          # 初始化所有 submodule
+          git submodule update --init --recursive
+          
           echo "已加载的外部驱动:"
-          ls -la drivers/external/
+          ls -la
+          
+          # 创建顶层 Makefile 包含所有驱动
+          cat > Makefile << 'EOF'
+          # External drivers Makefile
+          obj-$(CONFIG_BCM2079X) += bcm2079x_i2c_mod/
+          obj-$(CONFIG_BROADCOM_WL) += broadcom-wl/
+          obj-$(CONFIG_OPENRAZER) += openrazer/
+          obj-$(CONFIG_RTL8188EU) += rtl8188eu/
+          obj-$(CONFIG_RTL8188FU) += rtl8188fu/
+          obj-$(CONFIG_RTL8188GU) += rtl8188gu/
+          obj-$(CONFIG_RTL8723BU) += rtl8723bu/
+          obj-$(CONFIG_RTL8723DU) += rtl8723du/
+          obj-$(CONFIG_RTL8812AU) += rtl8812au/
+          obj-$(CONFIG_RTL8821AU) += rtl8821au/
+          obj-$(CONFIG_RTL8821CE) += rtl8821ce/
+          obj-$(CONFIG_RTL8821CU) += rtl8821cu/
+          obj-$(CONFIG_RTL88X2BU) += rtl88x2bu/
+          obj-$(CONFIG_TP_SMAPI) += tp_smapi/
+          obj-$(CONFIG_XPAD) += xpad/
+          EOF
+          
+          # 将外部驱动添加到内核编译系统
+          if ! grep -q "external" ../Makefile; then
+            echo "obj-y += external/" >> ../Makefile
+            echo "已将 external 驱动添加到编译系统"
+          fi
 
       - name: Setup KernelSU
         if: ${{ env.KERNELSU == 'true' }}
@@ -175,6 +206,23 @@ jobs:
             ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           fi
           
+          # 启用外部驱动
+          ./scripts/config --enable CONFIG_BCM2079X
+          ./scripts/config --enable CONFIG_BROADCOM_WL
+          ./scripts/config --enable CONFIG_OPENRAZER
+          ./scripts/config --enable CONFIG_RTL8188EU
+          ./scripts/config --enable CONFIG_RTL8188FU
+          ./scripts/config --enable CONFIG_RTL8188GU
+          ./scripts/config --enable CONFIG_RTL8723BU
+          ./scripts/config --enable CONFIG_RTL8723DU
+          ./scripts/config --enable CONFIG_RTL8812AU
+          ./scripts/config --enable CONFIG_RTL8821AU
+          ./scripts/config --enable CONFIG_RTL8821CE
+          ./scripts/config --enable CONFIG_RTL8821CU
+          ./scripts/config --enable CONFIG_RTL88X2BU
+          ./scripts/config --enable CONFIG_TP_SMAPI
+          ./scripts/config --enable CONFIG_XPAD
+          
           echo "=== 内核配置完成 ==="
 
       - name: Build kernel
@@ -216,6 +264,22 @@ jobs:
           # 复制编译日志
           cp build.log output/ 2>/dev/null || true
           
+          # 安装内核模块
+          echo "=== 安装内核模块 ==="
+          mkdir -p /tmp/modules
+          make LLVM=1 INSTALL_MOD_PATH=/tmp/modules INSTALL_MOD_STRIP=1 modules_install
+          
+          # 打包内核模块
+          echo "=== 打包内核模块 ==="
+          cd /tmp/modules
+          tar -czf ${{ github.workspace }}/kernel/output/kernel_modules-${{ env.KERNEL_VERSION }}.tar.gz .
+          
+          # 统计模块数量
+          MODULE_COUNT=$(find /tmp/modules -name "*.ko" | wc -l)
+          echo "已打包 $MODULE_COUNT 个内核模块"
+          
+          cd ${{ github.workspace }}/kernel
+          
           # 生成信息文件
           echo "BlissOS 16 Kernel Build Info" > output/build_info.txt
           echo "==========================" >> output/build_info.txt
@@ -225,6 +289,7 @@ jobs:
           echo "Build Date: $(date)" >> output/build_info.txt
           echo "KernelSU: ${{ env.KERNELSU }}" >> output/build_info.txt
           echo "Compiler: $(clang --version | head -1)" >> output/build_info.txt
+          echo "Kernel Modules: $MODULE_COUNT" >> output/build_info.txt
           
           # 显示输出
           echo "=== 输出文件 ==="
