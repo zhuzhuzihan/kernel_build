@@ -98,27 +98,25 @@ jobs:
           mkdir -p toolchain
           cd toolchain
           
-          # 初始化 git 仓库
-          git init aosp-clang
+          # 使用新版稀疏克隆方式
+          git clone --filter=blob:none --sparse --depth=1 \
+            --branch android-14.0.0_r75 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            aosp-clang
+          
           cd aosp-clang
           
-          # 配置稀疏检出
-          git config core.sparseCheckout true
-          git remote add origin https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+          # 稀疏检出 clang-r510928 目录
+          git sparse-checkout set clang-r510928
           
-          # 只检出 clang-r510928 目录
-          echo "clang-r510928/*" >> .git/info/sparse-checkout
-          
-          # 拉取指定分支
-          git fetch --depth=1 origin android-14.0.0_r75
-          git checkout FETCH_HEAD
+          # 设置环境变量
+          CLANG_PATH="$(pwd)/clang-r510928/bin"
+          echo "CLANG_PATH=$CLANG_PATH" >> $GITHUB_ENV
+          echo "PATH=$CLANG_PATH:/usr/bin:$PATH" >> $GITHUB_ENV
           
           # 验证
           echo "=== Clang 版本 ==="
-          clang-r510928/bin/clang --version
-          
-          # 设置环境变量
-          echo "CLANG_PATH=$(pwd)/clang-r510928/bin" >> $GITHUB_ENV
+          clang --version
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -210,10 +208,7 @@ jobs:
         run: |
           cd kernel
           
-          export PATH="${{ env.CLANG_PATH }}:/usr/bin:${PATH}"
-          
           make mrproper
-          
           make CC=clang android-x86_64_defconfig
           
           if [ "${{ env.KERNELSU }}" = "true" ]; then
@@ -237,13 +232,15 @@ jobs:
           ./scripts/config --enable CONFIG_TP_SMAPI
           ./scripts/config --enable CONFIG_XPAD
           
+          # 自动接受所有新配置项的默认值，避免交互式提示
+          make CC=clang olddefconfig
+          
           echo "=== 内核配置完成 ==="
 
       - name: Build kernel
         run: |
           cd kernel
           
-          export PATH="${{ env.CLANG_PATH }}:/usr/bin:${PATH}"
           export ARCH=x86_64
           export SUBARCH=x86_64
           export LOCALVERSION="-gloria-kernelsu"
@@ -260,8 +257,6 @@ jobs:
       - name: Prepare artifacts
         run: |
           cd kernel
-          
-          export PATH="${{ env.CLANG_PATH }}:/usr/bin:${PATH}"
           
           mkdir -p output
           
