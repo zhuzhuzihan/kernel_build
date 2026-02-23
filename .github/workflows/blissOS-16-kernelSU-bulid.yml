@@ -1,0 +1,266 @@
+name: BlissOS 16 KernelSU Kernel Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Kernel branch to build'
+        required: true
+        default: 'hm/gloria'
+        type: string
+      kernel_version:
+        description: 'Kernel version suffix'
+        required: true
+        default: '6.1.112'
+        type: string
+      build_kernelSU:
+        description: 'Build with KernelSU'
+        required: true
+        default: true
+        type: boolean
+      upload_to_release:
+        description: 'Upload to Release'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'hm/gloria' }}
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.1.112' }}
+  KERNELSU: ${{ github.event.inputs.build_kernelSU || 'true' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Free disk space
+        run: |
+          echo "=== 清理不需要的软件包以释放空间 ==="
+          # 删除大型不需要的软件
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android/sdk
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/go
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/hostedtoolcache/Ruby
+          sudo rm -rf /opt/hostedtoolcache/node
+          sudo rm -rf /opt/microsoft
+          sudo rm -rf /opt/pipx
+          sudo rm -rf /opt/google
+          sudo rm -rf /opt/az
+          
+          # 删除 APT 缓存
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          
+          # 卸载不需要的软件包
+          sudo apt-get remove -y \
+            azure-cli \
+            google-chrome-stable \
+            firefox \
+            microsoft-edge-stable \
+            powershell \
+            temurin-8-jdk \
+            temurin-11-jdk \
+            temurin-17-jdk \
+            dotnet-sdk-* \
+            mono-complete \
+            2>/dev/null || true
+          
+          # 显示磁盘空间
+          echo "=== 磁盘空间状态 ==="
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            libncurses-dev \
+            llvm \
+            clang \
+            lld \
+            ccache \
+            git \
+            cpio \
+            python3 \
+            file \
+            zstd \
+            pahole
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel-${{ env.KERNEL_BRANCH }}
+          max-size: 2G
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout kernel source
+        run: |
+          echo "=== 克隆内核源码 ==="
+          git clone https://github.com/android-generic/kerNel_common.git -b ${{ env.KERNEL_BRANCH }} --depth=1 kernel
+          cd kernel
+          echo "内核版本: $(make kernelversion)"
+          echo "分支: $(git branch --show-current)"
+          echo "提交: $(git log -1 --oneline)"
+
+      - name: Checkout kernel drivers
+        run: |
+          echo "=== 克隆内核驱动 ==="
+          cd kernel
+          git clone https://github.com/android-generic/external_kernel-drivers.git -b 6.1 --depth=1 drivers/external
+          echo "已加载的外部驱动:"
+          ls -la drivers/external/
+
+      - name: Setup KernelSU
+        if: ${{ env.KERNELSU == 'true' }}
+        run: |
+          echo "=== 集成 ReSukiSU ==="
+          cd kernel
+          
+          # 删除内核仓库自带的 KernelSU 文件夹
+          if [ -d "KernelSU" ]; then
+            echo "删除原有的 KernelSU 文件夹"
+            rm -rf KernelSU
+          fi
+          
+          # 下载并运行 ReSukiSU setup 脚本
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          
+          # 检查是否成功
+          if [ -d "drivers/kernelsu" ]; then
+            echo "ReSukiSU 集成成功"
+            ls -la drivers/kernelsu/
+          else
+            echo "ReSukiSU 集成失败"
+            exit 1
+          fi
+
+      - name: Apply KernelSU patches
+        if: ${{ env.KERNELSU == 'true' }}
+        run: |
+          echo "=== 应用 KernelSU 补丁 ==="
+          cd kernel
+          
+          # 应用所有补丁文件
+          for patch_file in ${{ github.workspace }}/patch/*.diff; do
+            echo "应用补丁: $patch_file"
+            git apply --check "$patch_file" && git apply "$patch_file" || echo "补丁 $patch_file 可能已应用或失败"
+          done
+          
+          echo "=== 补丁应用完成 ==="
+
+      - name: Configure kernel
+        run: |
+          cd kernel
+          
+          # 设置编译器
+          export LLVM=1
+          
+          # 清理
+          make mrproper
+          
+          # 加载 defconfig
+          make LLVM=1 android-x86_64_defconfig
+          
+          # 如果启用 KernelSU，添加相关配置
+          if [ "${{ env.KERNELSU }}" = "true" ]; then
+            ./scripts/config --enable CONFIG_KSU
+            ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
+          fi
+          
+          # 保存配置
+          make LLVM=1 savedefconfig
+          echo "=== 内核配置完成 ==="
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          
+          # 设置编译环境
+          export LLVM=1
+          export ARCH=x86_64
+          export SUBARCH=x86_64
+          export LOCALVERSION="-gloria-kernelsu"
+          
+          # 获取 CPU 核心数
+          JOBS=$(nproc)
+          echo "=== 开始编译内核 (使用 $JOBS 个核心) ==="
+          
+          # 编译
+          make LLVM=1 -j${JOBS} 2>&1 | tee build.log
+          
+          echo "=== 编译完成 ==="
+
+      - name: Prepare artifacts
+        run: |
+          cd kernel
+          
+          # 创建输出目录
+          mkdir -p output
+          
+          # 复制内核镜像
+          cp arch/x86/boot/bzImage output/bzImage-${{ env.KERNEL_VERSION }}-gloria-kernelsu
+          cp vmlinux output/vmlinux-${{ env.KERNEL_VERSION }}-gloria-kernelsu
+          
+          # 复制 System.map
+          cp System.map output/System.map-${{ env.KERNEL_VERSION }}-gloria-kernelsu
+          
+          # 复制内核配置
+          cp .config output/config-${{ env.KERNEL_VERSION }}-gloria-kernelsu
+          
+          # 复制编译日志
+          cp build.log output/ 2>/dev/null || true
+          
+          # 生成信息文件
+          echo "BlissOS 16 Kernel Build Info" > output/build_info.txt
+          echo "==========================" >> output/build_info.txt
+          echo "Kernel Version: $(make kernelversion)" >> output/build_info.txt
+          echo "Branch: ${{ env.KERNEL_BRANCH }}" >> output/build_info.txt
+          echo "Commit: $(git log -1 --oneline)" >> output/build_info.txt
+          echo "Build Date: $(date)" >> output/build_info.txt
+          echo "KernelSU: ${{ env.KERNELSU }}" >> output/build_info.txt
+          echo "Compiler: $(clang --version | head -1)" >> output/build_info.txt
+          
+          # 显示输出
+          echo "=== 输出文件 ==="
+          ls -la output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: blissos-kernel-${{ env.KERNEL_VERSION }}
+          path: kernel/output/
+          retention-days: 30
+
+      - name: Create release
+        if: ${{ github.event.inputs.upload_to_release == 'true' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: kernel-${{ env.KERNEL_VERSION }}-${{ github.run_number }}
+          name: BlissOS Kernel ${{ env.KERNEL_VERSION }} - Build ${{ github.run_number }}
+          body_path: kernel/output/build_info.txt
+          files: kernel/output/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post build summary
+        run: |
+          echo "## 构建完成 ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 内核版本 | ${{ env.KERNEL_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 分支 | ${{ env.KERNEL_BRANCH }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| KernelSU | ${{ env.KERNELSU }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 构建号 | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
