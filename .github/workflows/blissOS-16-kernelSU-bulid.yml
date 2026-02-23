@@ -85,16 +85,40 @@ jobs:
             libelf-dev \
             libssl-dev \
             libncurses-dev \
-            llvm \
-            clang \
-            lld \
             ccache \
             git \
             cpio \
             python3 \
             file \
             zstd \
-            pahole
+            pahole \
+            lld
+
+      - name: Setup AOSP Clang toolchain
+        run: |
+          echo "=== 设置 AOSP 兼容的 Clang 编译器 ==="
+          
+          # 安装 Clang 17 (推荐用于 kernel 6.1)
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17
+          
+          # 安装必要的工具
+          sudo apt-get install -y lld-17 llvm-17 clang-17
+          
+          # 创建符号链接
+          sudo ln -sf /usr/bin/clang-17 /usr/bin/clang
+          sudo ln -sf /usr/bin/clang++-17 /usr/bin/clang++
+          sudo ln -sf /usr/bin/ld.lld-17 /usr/bin/ld.lld
+          
+          # 验证版本
+          echo "=== Clang 版本 ==="
+          clang --version
+          ld.lld --version
+          
+          # 设置环境变量
+          echo "CLANG_PATH=/usr/bin" >> $GITHUB_ENV
+          echo "GCC_PATH=/usr/bin" >> $GITHUB_ENV
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -163,13 +187,10 @@ jobs:
         run: |
           cd kernel
           
-          # 设置编译器
-          export LLVM=1
-          
           # 清理
           make mrproper
           
-          # 加载 defconfig
+          # 加载 defconfig (x86_64 原生编译)
           make LLVM=1 android-x86_64_defconfig
           
           # 如果启用 KernelSU，添加相关配置
@@ -178,8 +199,6 @@ jobs:
             ./scripts/config --enable CONFIG_KSU_MANUAL_HOOK
           fi
           
-          # 保存配置
-          make LLVM=1 savedefconfig
           echo "=== 内核配置完成 ==="
 
       - name: Build kernel
@@ -187,7 +206,6 @@ jobs:
           cd kernel
           
           # 设置编译环境
-          export LLVM=1
           export ARCH=x86_64
           export SUBARCH=x86_64
           export LOCALVERSION="-gloria-kernelsu"
@@ -195,8 +213,9 @@ jobs:
           # 获取 CPU 核心数
           JOBS=$(nproc)
           echo "=== 开始编译内核 (使用 $JOBS 个核心) ==="
+          echo "=== 使用 Clang $(clang --version | head -1) ==="
           
-          # 编译
+          # 编译 (使用 LLVM 工具链)
           make LLVM=1 -j${JOBS} 2>&1 | tee build.log
           
           echo "=== 编译完成 ==="
