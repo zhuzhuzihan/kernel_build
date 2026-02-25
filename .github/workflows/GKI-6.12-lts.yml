@@ -82,20 +82,21 @@ jobs:
           
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b common-android16-6.12-lts \
-            --depth=1 \
-            --partial-clone --clone-filter=blob:limit=10M
+            --depth=1
           
-          echo "=== 同步必要源码 ==="
-          # 只同步编译所需的核心项目
-          repo sync -j$(nproc) -c --no-tags --no-clone-bundle \
-            kernel/build kernel/common \
-            prebuilts/clang/host/linux-x86 \
-            prebuilts/build-tools \
-            prebuilts/kernel-build-tools
+          echo "=== 同步源码 ==="
+          repo sync -j$(nproc) -c --no-tags --no-clone-bundle
+          
+          echo "=== 检查关键目录 ==="
+          ls -la
+          test -d common || { echo "错误: common 目录不存在"; exit 1; }
+          test -d build/kernel || { echo "错误: build/kernel 目录不存在"; exit 1; }
+          test -f tools/bazel || { echo "错误: tools/bazel 不存在"; exit 1; }
           
           df -h
 
       - name: Build GKI kernel
+        id: build_kernel
         run: |
           cd gki
           
@@ -113,52 +114,101 @@ jobs:
           esac
           
           echo "=== 编译 $KERNEL_TARGET ==="
+          echo "kernel_target=$KERNEL_TARGET" >> $GITHUB_OUTPUT
+          
+          set -o pipefail
           ./tools/bazel build //$KERNEL_TARGET $LTO_FLAGS \
             --config=fast --jobs=$(nproc) 2>&1 | tee build.log
+          
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "::error::Bazel 编译失败，退出码: $BUILD_EXIT_CODE"
+            tail -100 build.log
+            exit $BUILD_EXIT_CODE
+          fi
+          
+          echo "=== 编译成功 ==="
 
       - name: Build distribution
+        id: build_dist
         run: |
           cd gki
           
-          case "${{ env.TARGET_ARCH }}" in
-            arm64)   KERNEL_TARGET="kernel_aarch64" ;;
-            x86_64)  KERNEL_TARGET="kernel_x86_64" ;;
-            riscv64) KERNEL_TARGET="kernel_riscv64" ;;
-          esac
+          KERNEL_TARGET="${{ steps.build_kernel.outputs.kernel_target }}"
+          echo "=== 生成分发包: $KERNEL_TARGET ==="
           
-          echo "=== 生成分发包 ==="
+          set -o pipefail
           ./tools/bazel run //$KERNEL_TARGET_dist 2>&1 | tee dist.log
+          
+          DIST_EXIT_CODE=${PIPESTATUS[0]}
+          if [ $DIST_EXIT_CODE -ne 0 ]; then
+            echo "::error::生成分发包失败，退出码: $DIST_EXIT_CODE"
+            tail -100 dist.log
+            exit $DIST_EXIT_CODE
+          fi
+          
+          echo "=== 分发包生成成功 ==="
 
       - name: Prepare artifacts
         run: |
           cd gki
           
+          KERNEL_TARGET="${{ steps.build_kernel.outputs.kernel_target }}"
+          
           case "${{ env.TARGET_ARCH }}" in
-            arm64)   KERNEL_TARGET="kernel_aarch64"; IMAGE="Image" ;;
-            x86_64)  KERNEL_TARGET="kernel_x86_64"; IMAGE="bzImage" ;;
-            riscv64) KERNEL_TARGET="kernel_riscv64"; IMAGE="Image" ;;
+            arm64)   IMAGE="Image" ;;
+            x86_64)  IMAGE="bzImage" ;;
+            riscv64) IMAGE="Image" ;;
           esac
           
           mkdir -p output
           
-          # 只复制关键文件
-          find out/$KERNEL_TARGET/dist -maxdepth 1 -type f \
-            \( -name "$IMAGE" -o -name "*.img" -o -name "*.ko" \) \
-            -exec cp {} output/ \; 2>/dev/null || true
+          echo "=== 查找输出目录 ==="
+          find out -type d -name "dist" 2>/dev/null || true
+          
+          DIST_DIR="out/$KERNEL_TARGET/dist"
+          if [ -d "$DIST_DIR" ]; then
+            echo "从 $DIST_DIR 复制文件"
+            cp -v $DIST_DIR/$IMAGE output/ 2>/dev/null || true
+            cp -v $DIST_DIR/*.img output/ 2>/dev/null || true
+            cp -v $DIST_DIR/*.ko output/ 2>/dev/null || true
+            cp -v $DIST_DIR/vmlinux output/ 2>/dev/null || true
+          fi
+          
+          # 备用：从 bazel-out 查找
+          if [ ! -f "output/$IMAGE" ]; then
+            echo "从 bazel-out 查找内核镜像..."
+            find bazel-out -name "$IMAGE" -exec cp -v {} output/ \; 2>/dev/null || true
+          fi
           
           cp build.log output/ 2>/dev/null || true
+          cp dist.log output/ 2>/dev/null || true
+          
+          # 检查输出
+          echo "=== 输出文件 ==="
+          ls -la output/
+          
+          # 验证关键文件
+          TOTAL_SIZE=$(du -sb output/ | cut -f1)
+          if [ $TOTAL_SIZE -lt 10000 ]; then
+            echo "::error::输出文件太小 ($TOTAL_SIZE bytes)，编译可能失败"
+            exit 1
+          fi
+          
+          if [ ! -f "output/$IMAGE" ]; then
+            echo "::warning::未找到内核镜像 $IMAGE"
+          fi
           
           # 生成信息
           echo "GKI 6.12 LTS - ${{ env.TARGET_ARCH }}" > output/build_info.txt
           echo "Build: ${{ github.run_number }}" >> output/build_info.txt
           echo "Date: $(date)" >> output/build_info.txt
+          echo "Size: $TOTAL_SIZE bytes" >> output/build_info.txt
           
           # 清理源码释放空间
           echo "=== 清理源码 ==="
           rm -rf common build/kernel prebuilts/clang 2>/dev/null || true
           df -h
-          
-          ls -la output/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -183,4 +233,3 @@ jobs:
         run: |
           echo "## GKI 构建完成 ✅" >> $GITHUB_STEP_SUMMARY
           echo "架构: ${{ env.TARGET_ARCH }} | LTO: ${{ env.LTO_CONFIG }}" >> $GITHUB_STEP_SUMMARY
-
