@@ -95,6 +95,21 @@ jobs:
           
           df -h
 
+      - name: List available targets
+        run: |
+          cd gki
+          echo "=== 查看可用的编译目标 ==="
+          ls -la common/BUILD.bazel 2>/dev/null || echo "common/BUILD.bazel 不存在"
+          
+          # 检查 common 目录中的目标
+          if [ -f "common/BUILD.bazel" ]; then
+            echo "=== common 目录目标 ==="
+            grep -E "^(kernel_|name =)" common/BUILD.bazel | head -30 || true
+          fi
+          
+          # 尝试查询目标
+          ./tools/bazel query "//common:*" 2>/dev/null | grep -E "kernel_" | head -20 || true
+
       - name: Build GKI kernel
         id: build_kernel
         run: |
@@ -113,12 +128,12 @@ jobs:
             none) LTO_FLAGS="--lto=none" ;;
           esac
           
-          echo "=== 编译 $KERNEL_TARGET ==="
+          echo "=== 编译 //common:$KERNEL_TARGET ==="
           echo "kernel_target=$KERNEL_TARGET" >> $GITHUB_OUTPUT
           
           set -o pipefail
-          ./tools/bazel build //$KERNEL_TARGET $LTO_FLAGS \
-            --config=fast --jobs=$(nproc) 2>&1 | tee build.log
+          ./tools/bazel build //common:$KERNEL_TARGET $LTO_FLAGS \
+            --jobs=$(nproc) 2>&1 | tee build.log
           
           BUILD_EXIT_CODE=${PIPESTATUS[0]}
           if [ $BUILD_EXIT_CODE -ne 0 ]; then
@@ -135,10 +150,10 @@ jobs:
           cd gki
           
           KERNEL_TARGET="${{ steps.build_kernel.outputs.kernel_target }}"
-          echo "=== 生成分发包: $KERNEL_TARGET ==="
+          echo "=== 生成分发包: //common:${KERNEL_TARGET}_dist ==="
           
           set -o pipefail
-          ./tools/bazel run //$KERNEL_TARGET_dist 2>&1 | tee dist.log
+          ./tools/bazel run //common:${KERNEL_TARGET}_dist 2>&1 | tee dist.log
           
           DIST_EXIT_CODE=${PIPESTATUS[0]}
           if [ $DIST_EXIT_CODE -ne 0 ]; then
@@ -165,21 +180,27 @@ jobs:
           
           echo "=== 查找输出目录 ==="
           find out -type d -name "dist" 2>/dev/null || true
+          find . -path "./out/*" -name "*.img" 2>/dev/null | head -20 || true
           
-          DIST_DIR="out/$KERNEL_TARGET/dist"
-          if [ -d "$DIST_DIR" ]; then
-            echo "从 $DIST_DIR 复制文件"
-            cp -v $DIST_DIR/$IMAGE output/ 2>/dev/null || true
-            cp -v $DIST_DIR/*.img output/ 2>/dev/null || true
-            cp -v $DIST_DIR/*.ko output/ 2>/dev/null || true
-            cp -v $DIST_DIR/vmlinux output/ 2>/dev/null || true
-          fi
+          # 从多个可能的位置复制
+          for DIST_DIR in "out/$KERNEL_TARGET/dist" "out/dist" "out/common/$KERNEL_TARGET/dist"; do
+            if [ -d "$DIST_DIR" ]; then
+              echo "从 $DIST_DIR 复制文件"
+              cp -v $DIST_DIR/$IMAGE output/ 2>/dev/null || true
+              cp -v $DIST_DIR/*.img output/ 2>/dev/null || true
+              cp -v $DIST_DIR/*.ko output/ 2>/dev/null || true
+              cp -v $DIST_DIR/vmlinux output/ 2>/dev/null || true
+            fi
+          done
           
           # 备用：从 bazel-out 查找
           if [ ! -f "output/$IMAGE" ]; then
             echo "从 bazel-out 查找内核镜像..."
             find bazel-out -name "$IMAGE" -exec cp -v {} output/ \; 2>/dev/null || true
           fi
+          
+          # 备用：从 out 查找所有 img 文件
+          find out -name "*.img" -exec cp -v {} output/ \; 2>/dev/null || true
           
           cp build.log output/ 2>/dev/null || true
           cp dist.log output/ 2>/dev/null || true
