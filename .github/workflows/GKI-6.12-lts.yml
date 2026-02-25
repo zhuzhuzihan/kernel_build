@@ -22,6 +22,11 @@ on:
           - thin
           - full
           - none
+      kernel_name:
+        description: 'Kernel name suffix'
+        required: false
+        default: ''
+        type: string
       upload_to_release:
         description: 'Upload to Release'
         required: false
@@ -31,6 +36,7 @@ on:
 env:
   TARGET_ARCH: ${{ github.event.inputs.arch || 'arm64' }}
   LTO_CONFIG: ${{ github.event.inputs.build_lto || 'default' }}
+  KERNEL_NAME: ${{ github.event.inputs.kernel_name || '' }}
 
 jobs:
   build:
@@ -56,7 +62,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libelf-dev libssl-dev \
-            libncurses-dev llvm clang lld git cpio python3 file zstd
+            libncurses-dev llvm clang lld git cpio python3 file zstd zip
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -66,6 +72,34 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download AnyKernel3
+        run: |
+          echo "=== 下载 AnyKernel3 ==="
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          
+          # 配置 AnyKernel3
+          cd AnyKernel3
+          
+          # 根据架构设置
+          case "${{ env.TARGET_ARCH }}" in
+            arm64)   ARCH="arm64" ;;
+            x86_64)  ARCH="x86_64" ;;
+            riscv64) ARCH="riscv64" ;;
+          esac
+          
+          # 创建 anykernel.sh 配置
+          cat > anykernel.sh << EOF
+          # AnyKernel3 配置
+          kernelstring="GKI 6.12 LTS ${{ env.KERNEL_NAME }}"
+          do.modules=0
+          block=auto
+          do.devicecheck=0
+          do.clean=1
+          do.backup=1
+          EOF
+          
+          echo "AnyKernel3 准备完成"
 
       - name: Install repo tool
         run: |
@@ -164,6 +198,70 @@ jobs:
           
           echo "=== 分发包生成成功 ==="
 
+      - name: Prepare AnyKernel3 Zip
+        id: prepare_ak3
+        run: |
+          cd gki
+          
+          KERNEL_TARGET="${{ steps.build_kernel.outputs.kernel_target }}"
+          
+          case "${{ env.TARGET_ARCH }}" in
+            arm64)   IMAGE="Image" ;;
+            x86_64)  IMAGE="bzImage" ;;
+            riscv64) IMAGE="Image" ;;
+          esac
+          
+          echo "=== 查找内核镜像 ==="
+          KERNEL_IMAGE=""
+          
+          # 从多个可能的位置查找
+          for LOCATION in \
+            "out/$KERNEL_TARGET/dist/$IMAGE" \
+            "bazel-bin/common/$KERNEL_TARGET/$IMAGE" \
+            "bazel-out/k8-fastbuild/bin/common/$KERNEL_TARGET/$IMAGE"
+          do
+            if [ -f "$LOCATION" ]; then
+              KERNEL_IMAGE="$LOCATION"
+              echo "找到内核镜像: $KERNEL_IMAGE"
+              break
+            fi
+          done
+          
+          # 备用搜索
+          if [ -z "$KERNEL_IMAGE" ]; then
+            KERNEL_IMAGE=$(find . -name "$IMAGE" -type f 2>/dev/null | head -1)
+          fi
+          
+          if [ -z "$KERNEL_IMAGE" ] || [ ! -f "$KERNEL_IMAGE" ]; then
+            echo "::error::未找到内核镜像 $IMAGE"
+            exit 1
+          fi
+          
+          echo "kernel_image=$KERNEL_IMAGE" >> $GITHUB_OUTPUT
+          
+          # 复制到 AnyKernel3
+          echo "=== 准备 AnyKernel3 ==="
+          cp "$KERNEL_IMAGE" $GITHUB_WORKSPACE/AnyKernel3/Image
+          
+          cd $GITHUB_WORKSPACE/AnyKernel3
+          
+          # 生成文件名
+          DATE=$(date +%Y%m%d)
+          KERNEL_VERSION="6.12"
+          ZIP_NAME="GKI-${KERNEL_VERSION}-${{ env.TARGET_ARCH }}-${DATE}-${{ github.run_number }}"
+          if [ -n "${{ env.KERNEL_NAME }}" ]; then
+            ZIP_NAME="${ZIP_NAME}-${{ env.KERNEL_NAME }}"
+          fi
+          
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+          
+          # 打包
+          echo "=== 打包 AnyKernel3 ==="
+          zip -r9 "$ZIP_NAME.zip" * -x "*.git*" -x "*.md" -x "*README*"
+          
+          ls -la
+          echo "=== 生成 $ZIP_NAME.zip ==="
+
       - name: Prepare artifacts
         run: |
           cd gki
@@ -178,53 +276,56 @@ jobs:
           
           mkdir -p output
           
-          echo "=== 查找输出目录 ==="
-          find out -type d -name "dist" 2>/dev/null || true
-          find . -path "./out/*" -name "*.img" 2>/dev/null | head -20 || true
+          echo "=== 查找并复制关键文件 ==="
           
-          # 从多个可能的位置复制
+          # 只复制: Image, boot*.img
           for DIST_DIR in "out/$KERNEL_TARGET/dist" "out/dist" "out/common/$KERNEL_TARGET/dist"; do
             if [ -d "$DIST_DIR" ]; then
               echo "从 $DIST_DIR 复制文件"
+              # 只复制 Image
               cp -v $DIST_DIR/$IMAGE output/ 2>/dev/null || true
-              cp -v $DIST_DIR/*.img output/ 2>/dev/null || true
-              cp -v $DIST_DIR/*.ko output/ 2>/dev/null || true
-              cp -v $DIST_DIR/vmlinux output/ 2>/dev/null || true
+              # 只复制 boot*.img
+              cp -v $DIST_DIR/boot*.img output/ 2>/dev/null || true
             fi
           done
           
-          # 备用：从 bazel-out 查找
+          # 备用：从 bazel-out 查找 Image
           if [ ! -f "output/$IMAGE" ]; then
-            echo "从 bazel-out 查找内核镜像..."
             find bazel-out -name "$IMAGE" -exec cp -v {} output/ \; 2>/dev/null || true
           fi
           
-          # 备用：从 out 查找所有 img 文件
-          find out -name "*.img" -exec cp -v {} output/ \; 2>/dev/null || true
+          # 备用：从 out 查找 boot*.img
+          find out -name "boot*.img" -exec cp -v {} output/ \; 2>/dev/null || true
+          find out -name "boot-*.img" -exec cp -v {} output/ \; 2>/dev/null || true
+          find out -name "boot.img" -exec cp -v {} output/ \; 2>/dev/null || true
           
-          cp build.log output/ 2>/dev/null || true
-          cp dist.log output/ 2>/dev/null || true
+          # 复制 AnyKernel3 zip
+          AK3_ZIP="${{ steps.prepare_ak3.outputs.zip_name }}.zip"
+          if [ -f "$GITHUB_WORKSPACE/AnyKernel3/$AK3_ZIP" ]; then
+            cp "$GITHUB_WORKSPACE/AnyKernel3/$AK3_ZIP" output/
+          fi
           
-          # 检查输出
+          # 检查输出 - 只显示关键文件
           echo "=== 输出文件 ==="
-          ls -la output/
+          ls -lh output/
           
           # 验证关键文件
           TOTAL_SIZE=$(du -sb output/ | cut -f1)
-          if [ $TOTAL_SIZE -lt 10000 ]; then
+          if [ $TOTAL_SIZE -lt 10000000 ]; then
             echo "::error::输出文件太小 ($TOTAL_SIZE bytes)，编译可能失败"
             exit 1
           fi
           
           if [ ! -f "output/$IMAGE" ]; then
-            echo "::warning::未找到内核镜像 $IMAGE"
+            echo "::error::未找到内核镜像 $IMAGE"
+            exit 1
           fi
           
           # 生成信息
           echo "GKI 6.12 LTS - ${{ env.TARGET_ARCH }}" > output/build_info.txt
           echo "Build: ${{ github.run_number }}" >> output/build_info.txt
           echo "Date: $(date)" >> output/build_info.txt
-          echo "Size: $TOTAL_SIZE bytes" >> output/build_info.txt
+          echo "Kernel Name: ${{ env.KERNEL_NAME }}" >> output/build_info.txt
           
           # 清理源码释放空间
           echo "=== 清理源码 ==="
@@ -234,7 +335,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gki-6.12-${{ env.TARGET_ARCH }}
+          name: ${{ steps.prepare_ak3.outputs.zip_name }}
           path: gki/output/
           retention-days: 7
           compression-level: 9
@@ -244,7 +345,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: gki-6.12-${{ env.TARGET_ARCH }}-${{ github.run_number }}
-          name: GKI 6.12 ${{ env.TARGET_ARCH }} #${{ github.run_number }}
+          name: GKI 6.12 ${{ env.TARGET_ARCH }} ${{ env.KERNEL_NAME }}#${{ github.run_number }}
           body_path: gki/output/build_info.txt
           files: gki/output/*
         env:
@@ -253,4 +354,9 @@ jobs:
       - name: Post build summary
         run: |
           echo "## GKI 构建完成 ✅" >> $GITHUB_STEP_SUMMARY
-          echo "架构: ${{ env.TARGET_ARCH }} | LTO: ${{ env.LTO_CONFIG }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 架构 | ${{ env.TARGET_ARCH }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| LTO | ${{ env.LTO_CONFIG }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 产物 | ${{ steps.prepare_ak3.outputs.zip_name }}.zip |" >> $GITHUB_STEP_SUMMARY
