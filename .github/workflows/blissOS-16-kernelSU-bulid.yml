@@ -184,7 +184,7 @@ jobs:
           cd kernel
           
           # 应用补丁文件
-          patch_file="${{ github.workspace }}/patch/patch.diff"
+          patch_file="${{ github.workspace }}/patch/blissOS/patch.diff"
           echo "应用补丁: $patch_file"
           git apply --check "$patch_file" && git apply "$patch_file" || echo "补丁可能已应用或失败"
           
