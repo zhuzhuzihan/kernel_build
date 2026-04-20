@@ -23,6 +23,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: write
+
 jobs:
   # ──────────────────────────────────────────────
   # 阶段 1: 根据用户选择生成 matrix 配置
@@ -39,13 +42,13 @@ jobs:
           echo "用户选择: $DEVICE"
 
           if [ "$DEVICE" = "all" ]; then
-            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)"},{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)"}]}'
+            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)","build_script":"build_floral.sh"},{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)","build_script":"build_sunfish.sh"}]}'
             echo "将同时编译: coral + sunfish"
           elif [ "$DEVICE" = "coral" ]; then
-            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)"}]}'
+            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)","build_script":"build_floral.sh"}]}'
             echo "仅编译: coral"
           elif [ "$DEVICE" = "sunfish" ]; then
-            MATRIX='{"include":[{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)"}]}'
+            MATRIX='{"include":[{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)","build_script":"build_sunfish.sh"}]}'
             echo "仅编译: sunfish"
           else
             echo "::error::未知设备: $DEVICE"
@@ -110,6 +113,7 @@ jobs:
           echo "kernel_version=4.14" >> $GITHUB_OUTPUT
           echo "目标设备: ${{ matrix.device_pretty }}"
           echo "清单分支: ${{ matrix.manifest_branch }}"
+          echo "构建脚本: ${{ matrix.build_script }}"
 
       - name: Install repo tool
         run: |
@@ -120,6 +124,7 @@ jobs:
           git config --global user.name "CI" && git config --global user.email "ci@localhost"
 
       - name: Sync kernel source
+        id: sync_source
         run: |
           echo "=== 初始化仓库 ==="
           mkdir kernel && cd kernel
@@ -140,8 +145,43 @@ jobs:
           test -d private || echo "警告: private 目录不存在"
           test -d build || echo "警告: build 目录不存在"
 
+          echo "=== 查找内核源码目录（包含 drivers/ 的目录）==="
+          KERNEL_SRC_DIR=""
+          for dir in \
+            "private/msm-google" \
+            "private/msm" \
+            "."; do
+            if [ -d "$dir/drivers" ]; then
+              KERNEL_SRC_DIR="$dir"
+              echo "找到内核源码目录: $KERNEL_SRC_DIR"
+              break
+            fi
+          done
+
+          if [ -z "$KERNEL_SRC_DIR" ]; then
+            echo "使用 find 搜索 drivers/ 目录..."
+            KERNEL_SRC_DIR=$(find . -maxdepth 3 -type d -name "drivers" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            if [ -n "$KERNEL_SRC_DIR" ]; then
+              # 去掉开头的 ./
+              KERNEL_SRC_DIR=${KERNEL_SRC_DIR#./}
+              echo "找到内核源码目录: $KERNEL_SRC_DIR"
+            fi
+          fi
+
+          if [ -z "$KERNEL_SRC_DIR" ]; then
+            echo "::error::未找到内核源码目录（缺少 drivers/）"
+            exit 1
+          fi
+
+          echo "kernel_src_dir=$KERNEL_SRC_DIR" >> $GITHUB_OUTPUT
+
+          echo "=== 列出内核源码目录内容 ==="
+          ls -la "$KERNEL_SRC_DIR/"
+
           echo "=== 查找构建配置 ==="
-          find . -name "build.config*" -type f 2>/dev/null | head -20
+          find . -name "build.config*" -type f 2>/dev/null
+          echo "=== 查找构建脚本 ==="
+          find . -name "build_*.sh" -type f 2>/dev/null
 
           df -h
 
@@ -149,7 +189,12 @@ jobs:
         run: |
           cd kernel
 
+          KERNEL_SRC_DIR="${{ steps.sync_source.outputs.kernel_src_dir }}"
           echo "=== 集成 ReSukiSU ==="
+          echo "内核源码目录: $KERNEL_SRC_DIR"
+
+          # 进入内核源码目录执行 ReSukiSU 安装
+          cd "$KERNEL_SRC_DIR"
 
           # 删除原有的 KernelSU 目录（如果存在）
           rm -rf KernelSU 2>/dev/null || true
@@ -174,7 +219,9 @@ jobs:
         run: |
           cd kernel
 
-          echo "=== 应用 KSU 手动钩子补丁（参考 ReSukiSU 官方文档） ==="
+          KERNEL_SRC_DIR="${{ steps.sync_source.outputs.kernel_src_dir }}"
+          echo "=== 应用 KSU 手动钩子补丁 ==="
+          echo "内核源码目录: $KERNEL_SRC_DIR"
           echo "目标: Linux 4.14 内核"
           echo "钩子版本选择:"
           echo "  execve:    3.14+ (ksu_handle_execveat)"
@@ -187,6 +234,9 @@ jobs:
           echo "  rename:    不需要 (仅 4.2- 内核)"
           echo "  policy_rwlock: 强制（去掉 static + EXPORT_SYMBOL）"
           echo "  path_umount: 强制（从 5.9 移植 + EXPORT_SYMBOL）"
+
+          # 进入内核源码目录
+          cd "$KERNEL_SRC_DIR"
 
           python3 << 'PATCH_SCRIPT'
           import os, sys
@@ -522,59 +572,77 @@ jobs:
               print("✓ 补丁应用完成")
           PATCH_SCRIPT
 
+          # 提交补丁更改
+          git add .
+          git commit -m "Apply KSU manual hook patches" || true
+
       - name: Enable KSU config and build kernel
         id: build_kernel
         run: |
           cd kernel
 
           DEVICE="${{ matrix.device }}"
+          KERNEL_SRC_DIR="${{ steps.sync_source.outputs.kernel_src_dir }}"
+          BUILD_SCRIPT="${{ matrix.build_script }}"
+          echo "设备: $DEVICE"
+          echo "内核源码目录: $KERNEL_SRC_DIR"
+          echo "构建脚本: $BUILD_SCRIPT"
 
-          # 查找构建配置
-          echo "=== 查找构建配置 ==="
-          BUILD_CONFIG=""
-          for config in \
-            "private/msm-google/build.config.${DEVICE}" \
-            "private/devices/google/${DEVICE}/build.config.${DEVICE}" \
-            "build.config.${DEVICE}" \
-            "private/msm-google/build.config.flame"; do
-            if [ -f "$config" ]; then
-              BUILD_CONFIG="$config"
-              echo "找到构建配置: $BUILD_CONFIG"
-              break
-            fi
-          done
-
-          # 如果找不到设备特定配置，列出所有可用配置
-          if [ -z "$BUILD_CONFIG" ]; then
-            echo "未找到设备特定构建配置，列出所有可用配置:"
-            find . -name "build.config*" -type f 2>/dev/null | head -20
-            echo "::error::未找到构建配置文件"
-            exit 1
-          fi
-
-          echo "build_config=$BUILD_CONFIG" >> $GITHUB_OUTPUT
-
+          # ──────────────────────────────────────────────
           # 启用 KSU 配置
+          # ──────────────────────────────────────────────
           echo "=== 启用 KSU 配置 ==="
           echo "参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html"
           echo ""
           echo "Linux 4.14 内核配置策略:"
           echo "  CONFIG_KSU=y                        (启用 KernelSU)"
           echo "  CONFIG_KSU_MANUAL_HOOK=y            (启用手动钩子)"
-          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y   (自动 setuid hook，4.2~6.8 内核)"
-          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y   (自动 sys_read hook，4.2~6.8 内核)"
+          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y   (自动 setuid hook)"
+          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y   (自动 sys_read hook)"
           echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y    (自动 input hook)"
 
           # 从构建配置中提取 DEFCONFIG 名称
-          DEFCONFIG_NAME=$(grep -E '^DEFCONFIG=' "$BUILD_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2)
+          # 查找策略：先在构建脚本中查找，再在 build.config 中查找
+          DEFCONFIG_NAME=""
+          for config_file in \
+            "$KERNEL_SRC_DIR/build.config.${DEVICE}" \
+            "$KERNEL_SRC_DIR/build.config.common" \
+            "build.config"; do
+            if [ -f "$config_file" ]; then
+              DEFCONFIG_NAME=$(grep -E '^[[:space:]]*DEFCONFIG=' "$config_file" 2>/dev/null | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
+              if [ -n "$DEFCONFIG_NAME" ]; then
+                echo "从 $config_file 找到 DEFCONFIG: $DEFCONFIG_NAME"
+                break
+              fi
+            fi
+          done
+
+          # 如果还没找到，尝试从构建脚本中提取
+          if [ -z "$DEFCONFIG_NAME" ] && [ -f "$BUILD_SCRIPT" ]; then
+            DEFCONFIG_NAME=$(grep -E 'DEFCONFIG=' "$BUILD_SCRIPT" 2>/dev/null | head -1 | sed 's/.*DEFCONFIG=\([^[:space:]]*\).*/\1/' | tr -d '"' | tr -d "'")
+            if [ -n "$DEFCONFIG_NAME" ]; then
+              echo "从 $BUILD_SCRIPT 找到 DEFCONFIG: $DEFCONFIG_NAME"
+            fi
+          fi
+
+          # 备用策略：使用常见 defconfig 名称
           if [ -z "$DEFCONFIG_NAME" ]; then
-            DEFCONFIG_NAME=$(grep -E 'DEFCONFIG=' "$BUILD_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2)
+            if [ "$DEVICE" = "coral" ]; then
+              DEFCONFIG_NAME="floral_defconfig"
+              echo "使用默认 defconfig: $DEFCONFIG_NAME (coral/flame)"
+            elif [ "$DEVICE" = "sunfish" ]; then
+              DEFCONFIG_NAME="sunfish_defconfig"
+              echo "使用默认 defconfig: $DEFCONFIG_NAME (sunfish)"
+            fi
           fi
 
           if [ -n "$DEFCONFIG_NAME" ]; then
             echo "Defconfig: $DEFCONFIG_NAME"
             # 查找 defconfig 文件
             DEFCONFIG_PATH=$(find . -name "$DEFCONFIG_NAME" -path "*/configs/*" -type f 2>/dev/null | head -1)
+            if [ -z "$DEFCONFIG_PATH" ]; then
+              DEFCONFIG_PATH=$(find . -name "$DEFCONFIG_NAME" -type f 2>/dev/null | head -1)
+            fi
             if [ -n "$DEFCONFIG_PATH" ]; then
               echo "修改 defconfig: $DEFCONFIG_PATH"
 
@@ -594,25 +662,74 @@ jobs:
             fi
           fi
 
-          # 设置 BUILD_AOSP_KERNEL=1 从本地源码编译（而非使用预编译 GKI 内核）
-          export BUILD_AOSP_KERNEL=1
-
+          # ──────────────────────────────────────────────
           # 构建内核
+          # ──────────────────────────────────────────────
           echo "=== 开始编译内核 ==="
-          echo "构建配置: $BUILD_CONFIG"
           echo "设备: ${{ matrix.device_pretty }}"
           echo "内核版本: 4.14"
 
-          set -o pipefail
-          BUILD_CONFIG="$BUILD_CONFIG" build/build.sh 2>&1 | tee build.log
+          export BUILD_AOSP_KERNEL=1
 
-          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          BUILD_EXIT_CODE=0
+
+          # 优先使用构建脚本（build_floral.sh / build_sunfish.sh）
+          if [ -f "$BUILD_SCRIPT" ]; then
+            echo "使用构建脚本: $BUILD_SCRIPT"
+            chmod +x "$BUILD_SCRIPT"
+            set -o pipefail
+            ./$BUILD_SCRIPT 2>&1 | tee build.log || BUILD_EXIT_CODE=$?
+          else
+            # 回退到 BUILD_CONFIG 方式
+            echo "构建脚本不存在，回退到 BUILD_CONFIG 方式"
+            BUILD_CONFIG=""
+
+            # 查找正确的 BUILD_CONFIG
+            if [ "$DEVICE" = "coral" ]; then
+              for config in \
+                "$KERNEL_SRC_DIR/build.config.floral.common.clang" \
+                "$KERNEL_SRC_DIR/build.config.floral" \
+                "$KERNEL_SRC_DIR/build.config.no-cfi"; do
+                if [ -f "$config" ]; then
+                  BUILD_CONFIG="$config"
+                  break
+                fi
+              done
+            elif [ "$DEVICE" = "sunfish" ]; then
+              for config in \
+                "$KERNEL_SRC_DIR/build.config.sunfish.common" \
+                "$KERNEL_SRC_DIR/build.config.sunfish" \
+                "$KERNEL_SRC_DIR/build.config.no-cfi"; do
+                if [ -f "$config" ]; then
+                  BUILD_CONFIG="$config"
+                  break
+                fi
+              done
+            fi
+
+            if [ -z "$BUILD_CONFIG" ]; then
+              # 最终回退：使用默认 build.config
+              if [ -f "build.config" ]; then
+                BUILD_CONFIG="build.config"
+                echo "使用默认 build.config"
+              else
+                echo "::error::未找到任何构建配置"
+                exit 1
+              fi
+            fi
+
+            echo "使用 BUILD_CONFIG: $BUILD_CONFIG"
+            set -o pipefail
+            BUILD_CONFIG="$BUILD_CONFIG" build/build.sh 2>&1 | tee build.log || BUILD_EXIT_CODE=$?
+          fi
+
           if [ $BUILD_EXIT_CODE -ne 0 ]; then
             echo "::error::内核编译失败，退出码: $BUILD_EXIT_CODE"
             tail -100 build.log
             exit $BUILD_EXIT_CODE
           fi
 
+          echo "build_config=${BUILD_CONFIG:-$BUILD_SCRIPT}" >> $GITHUB_OUTPUT
           echo "=== 编译成功 ==="
 
       - name: Prepare artifacts
