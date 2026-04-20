@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       device:
-        description: '目标设备 (coral=Pixel4/4XL, sunfish=Pixel4a)'
+        description: '目标设备 (all=同时编译全部, coral=Pixel4/4XL, sunfish=Pixel4a)'
         required: true
-        default: 'coral'
+        default: 'all'
         type: choice
         options:
+          - all
           - coral
           - sunfish
       kernel_name:
@@ -23,8 +24,48 @@ on:
         type: boolean
 
 jobs:
-  build:
+  # ──────────────────────────────────────────────
+  # 阶段 1: 根据用户选择生成 matrix 配置
+  # ──────────────────────────────────────────────
+  prepare:
     runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          DEVICE="${{ github.event.inputs.device || 'all' }}"
+          echo "用户选择: $DEVICE"
+
+          if [ "$DEVICE" = "all" ]; then
+            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)"},{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)"}]}'
+            echo "将同时编译: coral + sunfish"
+          elif [ "$DEVICE" = "coral" ]; then
+            MATRIX='{"include":[{"device":"coral","manifest_branch":"android-msm-coral-4.14-android13","device_pretty":"Pixel 4/4 XL (flame/coral)"}]}'
+            echo "仅编译: coral"
+          elif [ "$DEVICE" = "sunfish" ]; then
+            MATRIX='{"include":[{"device":"sunfish","manifest_branch":"android-msm-sunfish-4.14-android13-qpr3","device_pretty":"Pixel 4a (sunfish)"}]}'
+            echo "仅编译: sunfish"
+          else
+            echo "::error::未知设备: $DEVICE"
+            exit 1
+          fi
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Matrix: $MATRIX"
+
+  # ──────────────────────────────────────────────
+  # 阶段 2: 并行构建每个设备的内核
+  # ──────────────────────────────────────────────
+  build:
+    needs: prepare
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false  # 一个设备失败不影响其他设备
+
+    runs-on: ubuntu-22.04
+    name: "Build ${{ matrix.device_pretty }}"
 
     steps:
       - name: Free disk space
@@ -53,7 +94,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: pixel4-${{ github.event.inputs.device || 'coral' }}
+          key: pixel4-${{ matrix.device }}
           max-size: 2G
 
       - name: Checkout repository
@@ -62,27 +103,13 @@ jobs:
       - name: Set device environment
         id: device_env
         run: |
-          DEVICE="${{ github.event.inputs.device || 'coral' }}"
-          echo "DEVICE=$DEVICE" >> $GITHUB_OUTPUT
-          case "$DEVICE" in
-            coral)
-              echo "manifest_branch=android-msm-coral-4.14-android13" >> $GITHUB_OUTPUT
-              echo "device_name=coral" >> $GITHUB_OUTPUT
-              echo "device_pretty=Pixel 4/4 XL (flame/coral)" >> $GITHUB_OUTPUT
-              echo "kernel_version=4.14" >> $GITHUB_OUTPUT
-              ;;
-            sunfish)
-              echo "manifest_branch=android-msm-sunfish-4.14-android13-qpr3" >> $GITHUB_OUTPUT
-              echo "device_name=sunfish" >> $GITHUB_OUTPUT
-              echo "device_pretty=Pixel 4a (sunfish)" >> $GITHUB_OUTPUT
-              echo "kernel_version=4.14" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "::error::未知设备: $DEVICE"
-              exit 1
-              ;;
-          esac
-          echo "目标设备: $DEVICE"
+          echo "DEVICE=${{ matrix.device }}" >> $GITHUB_OUTPUT
+          echo "manifest_branch=${{ matrix.manifest_branch }}" >> $GITHUB_OUTPUT
+          echo "device_name=${{ matrix.device }}" >> $GITHUB_OUTPUT
+          echo "device_pretty=${{ matrix.device_pretty }}" >> $GITHUB_OUTPUT
+          echo "kernel_version=4.14" >> $GITHUB_OUTPUT
+          echo "目标设备: ${{ matrix.device_pretty }}"
+          echo "清单分支: ${{ matrix.manifest_branch }}"
 
       - name: Install repo tool
         run: |
@@ -97,8 +124,8 @@ jobs:
           echo "=== 初始化仓库 ==="
           mkdir kernel && cd kernel
 
-          MANIFEST_BRANCH="${{ steps.device_env.outputs.manifest_branch }}"
-          echo "设备: ${{ steps.device_env.outputs.device_pretty }}"
+          MANIFEST_BRANCH="${{ matrix.manifest_branch }}"
+          echo "设备: ${{ matrix.device_pretty }}"
           echo "清单分支: $MANIFEST_BRANCH"
 
           repo init -u https://android.googlesource.com/kernel/manifest \
@@ -464,10 +491,6 @@ jobs:
                   with open(path_umount_file, 'r') as f:
                       ns_content = f.read()
                   if 'EXPORT_SYMBOL(path_umount)' not in ns_content and 'int path_umount' in ns_content:
-                      ns_content = ns_content.replace(
-                          'int path_umount(struct path *path, int flags)\n{',
-                          'int path_umount(struct path *path, int flags)\n{',
-                      )
                       # 在 path_umount 函数结束后添加 EXPORT_SYMBOL
                       import re as re_mod2
                       ns_content = re_mod2.sub(
@@ -504,7 +527,7 @@ jobs:
         run: |
           cd kernel
 
-          DEVICE="${{ steps.device_env.outputs.device_name }}"
+          DEVICE="${{ matrix.device }}"
 
           # 查找构建配置
           echo "=== 查找构建配置 ==="
@@ -560,11 +583,8 @@ jobs:
               echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG_PATH"
 
               # 自动钩子配置（4.14 在 4.2~6.8 范围内，使用自动 hook 而非手动 hook）
-              # setuid hook: 4.2~6.8 内核通过 LSM 自动应用
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> "$DEFCONFIG_PATH"
-              # sys_read hook: 4.2~6.8 内核通过 LSM 自动应用（initrc hook）
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> "$DEFCONFIG_PATH"
-              # input hook: input_handler 未损坏时自动应用
               echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> "$DEFCONFIG_PATH"
 
               echo "已添加 KSU 配置到 defconfig（含自动钩子）"
@@ -580,7 +600,7 @@ jobs:
           # 构建内核
           echo "=== 开始编译内核 ==="
           echo "构建配置: $BUILD_CONFIG"
-          echo "设备: ${{ steps.device_env.outputs.device_pretty }}"
+          echo "设备: ${{ matrix.device_pretty }}"
           echo "内核版本: 4.14"
 
           set -o pipefail
@@ -661,11 +681,11 @@ jobs:
           fi
 
           # 生成构建信息
-          DEVICE="${{ steps.device_env.outputs.device_name }}"
+          DEVICE="${{ matrix.device }}"
           echo "Pixel 4 Kernel Build Info" > output/build_info.txt
           echo "=========================" >> output/build_info.txt
-          echo "Device: ${{ steps.device_env.outputs.device_pretty }}" >> output/build_info.txt
-          echo "Branch: ${{ steps.device_env.outputs.manifest_branch }}" >> output/build_info.txt
+          echo "Device: ${{ matrix.device_pretty }}" >> output/build_info.txt
+          echo "Branch: ${{ matrix.manifest_branch }}" >> output/build_info.txt
           echo "Build Config: ${{ steps.build_kernel.outputs.build_config }}" >> output/build_info.txt
           echo "Kernel Version: 4.14" >> output/build_info.txt
           echo "Build Date: $(date)" >> output/build_info.txt
@@ -692,7 +712,7 @@ jobs:
       - name: Prepare AnyKernel3 package
         id: prepare_ak3
         run: |
-          DEVICE="${{ steps.device_env.outputs.device_name }}"
+          DEVICE="${{ matrix.device }}"
           KERNEL_IMAGE="${{ steps.prepare_artifacts.outputs.kernel_image }}"
 
           cd AnyKernel3
@@ -717,7 +737,6 @@ jobs:
 
           # 复制内核镜像
           if [ -n "$KERNEL_IMAGE" ] && [ -f "$KERNEL_IMAGE" ]; then
-            # AnyKernel3 期望内核文件名为 Image（arm64）
             cp "$KERNEL_IMAGE" Image
             echo "已复制内核镜像: $KERNEL_IMAGE"
           else
@@ -755,7 +774,7 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pixel4-${{ steps.device_env.outputs.device_name }}-kernel
+          name: pixel4-${{ matrix.device }}-kernel
           path: kernel/output/
           retention-days: 7
           compression-level: 9
@@ -772,8 +791,8 @@ jobs:
         if: ${{ github.event.inputs.upload_to_release == 'true' }}
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: pixel4-${{ steps.device_env.outputs.device_name }}-${{ github.run_number }}
-          name: Pixel 4 ${{ steps.device_env.outputs.device_pretty }} ReSukiSU #${{ github.run_number }}
+          tag_name: pixel4-${{ matrix.device }}-${{ github.run_number }}
+          name: Pixel 4 ${{ matrix.device_pretty }} ReSukiSU #${{ github.run_number }}
           body_path: kernel/output/build_info.txt
           files: |
             kernel/output/*
@@ -782,13 +801,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post build summary
+        if: always()
         run: |
-          echo "## Pixel 4/4a/4 XL 构建完成 ✅" >> $GITHUB_STEP_SUMMARY
+          STATUS="✅"
+          if [ "${{ job.status }}" != "success" ]; then STATUS="❌"; fi
+          echo "## ${{ matrix.device_pretty }} 构建 $STATUS" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| 设备 | ${{ steps.device_env.outputs.device_pretty }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 清单分支 | ${{ steps.device_env.outputs.manifest_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 设备 | ${{ matrix.device_pretty }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 清单分支 | ${{ matrix.manifest_branch }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 构建配置 | ${{ steps.build_kernel.outputs.build_config }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 内核版本 | 4.14 |" >> $GITHUB_STEP_SUMMARY
           echo "| ReSukiSU | 始终启用 |" >> $GITHUB_STEP_SUMMARY
