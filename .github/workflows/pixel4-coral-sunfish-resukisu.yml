@@ -1,0 +1,795 @@
+name: Pixel 4/4a/4 XL Kernel Build (ReSukiSU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '目标设备 (coral=Pixel4/4XL, sunfish=Pixel4a)'
+        required: true
+        default: 'coral'
+        type: choice
+        options:
+          - coral
+          - sunfish
+      kernel_name:
+        description: '内核名称后缀'
+        required: false
+        default: ''
+        type: string
+      upload_to_release:
+        description: '上传到 Release'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Free disk space
+        run: |
+          echo "=== 清理磁盘空间 ==="
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/*
+          sudo rm -rf /opt/microsoft /opt/pipx /opt/google /opt/az
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get remove -y \
+            azure-cli google-chrome-stable firefox microsoft-edge-stable \
+            powershell temurin-*-jdk dotnet-sdk-* mono-complete \
+            2>/dev/null || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            libncurses-dev llvm clang lld git cpio python3 file zstd zip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            pahole dpkg-dev
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: pixel4-${{ github.event.inputs.device || 'coral' }}
+          max-size: 2G
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set device environment
+        id: device_env
+        run: |
+          DEVICE="${{ github.event.inputs.device || 'coral' }}"
+          echo "DEVICE=$DEVICE" >> $GITHUB_OUTPUT
+          case "$DEVICE" in
+            coral)
+              echo "manifest_branch=android-msm-coral-4.14-android13" >> $GITHUB_OUTPUT
+              echo "device_name=coral" >> $GITHUB_OUTPUT
+              echo "device_pretty=Pixel 4/4 XL (flame/coral)" >> $GITHUB_OUTPUT
+              echo "kernel_version=4.14" >> $GITHUB_OUTPUT
+              ;;
+            sunfish)
+              echo "manifest_branch=android-msm-sunfish-4.14-android13-qpr3" >> $GITHUB_OUTPUT
+              echo "device_name=sunfish" >> $GITHUB_OUTPUT
+              echo "device_pretty=Pixel 4a (sunfish)" >> $GITHUB_OUTPUT
+              echo "kernel_version=4.14" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "::error::未知设备: $DEVICE"
+              exit 1
+              ;;
+          esac
+          echo "目标设备: $DEVICE"
+
+      - name: Install repo tool
+        run: |
+          mkdir -p ~/bin
+          curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          git config --global user.name "CI" && git config --global user.email "ci@localhost"
+
+      - name: Sync kernel source
+        run: |
+          echo "=== 初始化仓库 ==="
+          mkdir kernel && cd kernel
+
+          MANIFEST_BRANCH="${{ steps.device_env.outputs.manifest_branch }}"
+          echo "设备: ${{ steps.device_env.outputs.device_pretty }}"
+          echo "清单分支: $MANIFEST_BRANCH"
+
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b $MANIFEST_BRANCH \
+            --depth=1
+
+          echo "=== 同步源码 ==="
+          repo sync -j$(nproc) -c --no-tags --no-clone-bundle
+
+          echo "=== 检查关键目录 ==="
+          ls -la
+          test -d private || echo "警告: private 目录不存在"
+          test -d build || echo "警告: build 目录不存在"
+
+          echo "=== 查找构建配置 ==="
+          find . -name "build.config*" -type f 2>/dev/null | head -20
+
+          df -h
+
+      - name: Setup ReSukiSU
+        run: |
+          cd kernel
+
+          echo "=== 集成 ReSukiSU ==="
+
+          # 删除原有的 KernelSU 目录（如果存在）
+          rm -rf KernelSU 2>/dev/null || true
+
+          # 执行 ReSukiSU 安装脚本
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+          # 检查是否成功
+          if [ -d "drivers/kernelsu" ]; then
+            echo "ReSukiSU 集成成功"
+            ls -la drivers/kernelsu/
+          else
+            echo "::error::ReSukiSU 集成失败"
+            exit 1
+          fi
+
+          # 提交更改（避免 dirty 标记）
+          git add .
+          git commit -m "Add ReSukiSU support" || true
+
+      - name: Apply KSU manual hook patches
+        run: |
+          cd kernel
+
+          echo "=== 应用 KSU 手动钩子补丁（参考 ReSukiSU 官方文档） ==="
+          echo "目标: Linux 4.14 内核"
+          echo "钩子版本选择:"
+          echo "  execve:    3.14+ (ksu_handle_execveat)"
+          echo "  faccessat: 4.19- (内联 SYSCALL_DEFINE3)"
+          echo "  stat:      通用"
+          echo "  reboot:    3.11+ (kernel/reboot.c)"
+          echo "  setuid:    自动 (CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK)"
+          echo "  sys_read:  自动 (CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK)"
+          echo "  input:     自动 (CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK)"
+          echo "  rename:    不需要 (仅 4.2- 内核)"
+          echo "  policy_rwlock: 强制（去掉 static + EXPORT_SYMBOL）"
+          echo "  path_umount: 强制（从 5.9 移植 + EXPORT_SYMBOL）"
+
+          python3 << 'PATCH_SCRIPT'
+          import os, sys
+
+          patched_files = 0
+          failed_files = 0
+
+          def patch_file(filepath, replacements):
+              """Apply replacements to a file.
+              replacements: list of (search, replace) tuples
+              """
+              global patched_files, failed_files
+
+              if not os.path.exists(filepath):
+                  print(f"  ✗ 文件不存在: {filepath}")
+                  failed_files += 1
+                  return False
+
+              with open(filepath, 'r') as f:
+                  content = f.read()
+
+              original = content
+
+              for search, replace in replacements:
+                  if search in content:
+                      content = content.replace(search, replace, 1)
+                      print(f"  ✓ 已补丁: {filepath} -> [{search[:60]}...]")
+                  else:
+                      print(f"  ⚠ 未找到模式: {filepath} -> [{search[:60]}...]")
+
+              if content != original:
+                  with open(filepath, 'w') as f:
+                      f.write(content)
+                  patched_files += 1
+                  return True
+              else:
+                  print(f"  ✗ 未做任何更改: {filepath}")
+                  failed_files += 1
+                  return False
+
+          # ============================================================
+          # fs/exec.c — execve hook (3.14+ 版本，使用 ksu_handle_execveat)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # 4.14 > 3.14，使用 ksu_handle_execveat
+          # hook do_execve 和 compat_do_execve（注意不是 compat_do_execveat）
+          # ============================================================
+          patch_file('fs/exec.c', [
+              # 在 do_execve 之前添加 extern 声明
+              ('int do_execve(struct filename *filename,',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '__attribute__((hot))\n'
+               'extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n'
+               '\t\t\t\tvoid *argv, void *envp, int *flags);\n'
+               '#endif\n\n'
+               'int do_execve(struct filename *filename,'),
+
+              # 在 do_execve 函数体中，return do_execveat_common(AT_FDCWD,...) 之前添加钩子
+              ('return do_execveat_common(AT_FDCWD, filename,',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n'
+               '#endif\n'
+               '\treturn do_execveat_common(AT_FDCWD, filename,'),
+
+              # 在 compat_do_execve 函数体中，return do_execveat_common(AT_FDCWD,...) 之前添加钩子
+              # 注意: 4.14 内核中是 compat_do_execve（非 compat_do_execveat）
+              # 匹配模式: .ptr.compat = __envp 后跟 return do_execveat_common(AT_FDCWD,
+              ('.ptr.compat = __envp,\n\t};\n\treturn do_execveat_common(AT_FDCWD,',
+               '.ptr.compat = __envp,\n'
+               '\t};\n'
+               '#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support\n'
+               '\tksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);\n'
+               '#endif\n'
+               '\treturn do_execveat_common(AT_FDCWD,'),
+          ])
+
+          # ============================================================
+          # fs/open.c — faccessat hook (4.19- 版本)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # 4.14 < 4.19，使用 4.19- 版本：钩子直接在 SYSCALL_DEFINE3 体内
+          # extern 声明放在 SYSCALL_DEFINE3 之前
+          # ============================================================
+          patch_file('fs/open.c', [
+              # 在 SYSCALL_DEFINE3(faccessat) 之前添加 extern 声明
+              # 4.19- 版本: extern 放在 SYSCALL_DEFINE3 之前（不是 do_faccessat 之后）
+              ('SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '__attribute__((hot))\n'
+               'extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n'
+               '\t\t\t\tint *mode, int *flags);\n'
+               '#endif\n\n'
+               'SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)'),
+
+              # 在 faccessat 系统调用体开头添加钩子
+              # 4.19- 版本: 在函数体开头，变量声明之前
+              ('SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n{',
+               'SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)\n'
+               '{\n'
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n'
+               '#endif'),
+          ])
+
+          # ============================================================
+          # fs/stat.c — stat hooks (通用版本)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # hook newfstatat, fstatat64 (入口) + newfstat, fstat64 (返回值)
+          # ============================================================
+          patch_file('fs/stat.c', [
+              # 在 newfstatat 之前添加所有 extern 声明
+              ('SYSCALL_DEFINE4(newfstatat,',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '__attribute__((hot))\n'
+               'extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n'
+               '\t\t\t\tint *flags);\n\n'
+               'extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n'
+               '#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n'
+               'extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n'
+               '#endif\n'
+               '#endif\n\n'
+               'SYSCALL_DEFINE4(newfstatat,'),
+
+              # 在 newfstatat 中 vfs_fstatat 之前添加钩子
+              ('error = vfs_fstatat(dfd, filename, &stat, flag);',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '\tksu_handle_stat(&dfd, &filename, &flag);\n'
+               '#endif\n'
+               '\terror = vfs_fstatat(dfd, filename, &stat, flag);'),
+
+              # 在 newfstat 中 cp_new_stat 之后添加钩子
+              ('error = cp_new_stat(&stat, statbuf);\n\n\treturn error;',
+               'error = cp_new_stat(&stat, statbuf);\n'
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '\tksu_handle_newfstat_ret(&fd, &statbuf);\n'
+               '#endif\n\n\treturn error;'),
+
+              # 在 fstat64 中 cp_new_stat64 之后添加钩子 (32-bit)
+              ('error = cp_new_stat64(&stat, statbuf);\n\n\treturn error;',
+               'error = cp_new_stat64(&stat, statbuf);\n'
+               '#ifdef CONFIG_KSU_MANUAL_HOOK // for 32-bit\n'
+               '\tksu_handle_fstat64_ret(&fd, &statbuf);\n'
+               '#endif\n\n\treturn error;'),
+
+              # 在 fstatat64 中 vfs_fstatat 之前添加钩子 (32-bit)
+              ('error = vfs_fstatat(dfd, filename, &stat, flag);\n\tif (error)',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit su\n'
+               '\tksu_handle_stat(&dfd, &filename, &flag);\n'
+               '#endif\n'
+               '\terror = vfs_fstatat(dfd, filename, &stat, flag);\n\tif (error)'),
+          ])
+
+          # ============================================================
+          # kernel/reboot.c — sys_reboot hook (3.11+ 版本)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # 4.14 > 3.11，使用 kernel/reboot.c（不是 kernel/sys.c）
+          # ============================================================
+          patch_file('kernel/reboot.c', [
+              # 在 SYSCALL_DEFINE4(reboot) 之前添加 extern 声明
+              ('SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               'extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n'
+               '#endif\n\n'
+               'SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,'),
+
+              # 在 reboot 系统调用体中，capability check 之前添加钩子
+              ('struct pid_namespace *pid_ns = task_active_pid_ns(current);',
+               '#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+               '\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n'
+               '#endif\n'
+               '\tstruct pid_namespace *pid_ns = task_active_pid_ns(current);'),
+          ])
+
+          # ============================================================
+          # security/selinux/ss/services.c — policy_rwlock export (强制)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # 去掉 policy_rwlock 定义前的 static 关键字，并添加 EXPORT_SYMBOL
+          # 不修改可能导致某些设备上内存管理方面的安全性问题
+          # ============================================================
+          policy_rwlock_patched = patch_file('security/selinux/ss/services.c', [
+              ('static DEFINE_RWLOCK(policy_rwlock);',
+               'DEFINE_RWLOCK(policy_rwlock);\nEXPORT_SYMBOL(policy_rwlock);'),
+          ])
+          if not policy_rwlock_patched:
+              # 尝试使用 re 正则匹配其他可能的格式（如前后有空白/注释）
+              import re
+              svc_file = 'security/selinux/ss/services.c'
+              if os.path.exists(svc_file):
+                  with open(svc_file, 'r') as f:
+                      svc_content = f.read()
+                  # 匹配任意空白 + static + DEFINE_RWLOCK(policy_rwlock)
+                  match = re.search(r'(\s*)static\s+DEFINE_RWLOCK\(policy_rwlock\)\s*;', svc_content)
+                  if match:
+                      indent = match.group(1)
+                      svc_content = svc_content[:match.start()] + \
+                          f'{indent}DEFINE_RWLOCK(policy_rwlock);\n{indent}EXPORT_SYMBOL(policy_rwlock);' + \
+                          svc_content[match.end():]
+                      with open(svc_file, 'w') as f:
+                          f.write(svc_content)
+                      print(f"  ✓ 已补丁(正则): {svc_file} -> policy_rwlock 去static + EXPORT_SYMBOL")
+                      policy_rwlock_patched = True
+                      patched_files += 1
+                  else:
+                      print(f"  ⚠ 正则也未匹配 policy_rwlock: {svc_file}")
+              else:
+                  print(f"  ✗ 文件不存在: {svc_file}")
+          if not policy_rwlock_patched:
+              print("⚠ 警告: policy_rwlock 补丁失败，ReSukiSU SELinux 功能可能受限")
+              print("   这不是致命错误，构建将继续")
+
+          # ============================================================
+          # fs/namespace.c — path_umount 移植 (强制，从 5.9 向旧版本移植)
+          # 参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html
+          # 允许在 GKI 之前的内核上获得卸载模块的功能
+          # 添加 EXPORT_SYMBOL 以确保 ReSukiSU 模块可访问
+          # ============================================================
+          path_umount_file = 'fs/namespace.c'
+          path_umount_patched = False
+          if os.path.exists(path_umount_file):
+              with open(path_umount_file, 'r') as f:
+                  ns_content = f.read()
+
+              # 仅在 path_umount 不存在时移植
+              if 'path_umount' not in ns_content:
+                  # 严格按照 ReSukiSU 官方文档的实现
+                  path_umount_lines = [
+                      '#ifdef CONFIG_KSU_MANUAL_HOOK',
+                      'static int can_umount(const struct path *path, int flags)',
+                      '{',
+                      '\tstruct mount *mnt = real_mount(path->mnt);',
+                      '',
+                      '\tif (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))',
+                      '\t\treturn -EINVAL;',
+                      '\tif (!may_mount())',
+                      '\t\treturn -EPERM;',
+                      '\tif (path->dentry != path->mnt->mnt_root)',
+                      '\t\treturn -EINVAL;',
+                      '\tif (!check_mnt(mnt))',
+                      '\t\treturn -EINVAL;',
+                      '\tif (mnt->mnt.mnt_flags & MNT_LOCKED)',
+                      '\t\treturn -EINVAL;',
+                      '\tif (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))',
+                      '\t\treturn -EPERM;',
+                      '\treturn 0;',
+                      '}',
+                      '',
+                      'int path_umount(struct path *path, int flags)',
+                      '{',
+                      '\tstruct mount *mnt = real_mount(path->mnt);',
+                      '\tint ret;',
+                      '',
+                      '\tret = can_umount(path, flags);',
+                      '\tif (!ret)',
+                      '\t\tret = do_umount(mnt, flags);',
+                      '\tdput(path->dentry);',
+                      '\tmntput_no_expire(mnt);',
+                      '\treturn ret;',
+                      '}',
+                      'EXPORT_SYMBOL(path_umount);',
+                      '#endif',
+                      '',
+                  ]
+                  path_umount_impl = '\n'.join(path_umount_lines)
+
+                  # 找到插入锚点 - 优先使用 umount 注释块
+                  umount_anchor = '/*\n * Now umount can handle mount points as well as block devices.\n * This is important for filesystems which use unnamed block devices.\n */'
+                  umount_anchor2 = 'SYSCALL_DEFINE2(umount'
+                  # 备用锚点：do_umount 函数定义之后
+                  umount_anchor3 = 'SYSCALL_DEFINE2(umount2'
+
+                  if umount_anchor in ns_content:
+                      ns_content = ns_content.replace(umount_anchor, path_umount_impl + umount_anchor, 1)
+                      print(f"  ✓ 已补丁: {path_umount_file} -> 移植 path_umount (锚点: umount 注释块)")
+                      path_umount_patched = True
+                  elif umount_anchor2 in ns_content:
+                      ns_content = ns_content.replace(umount_anchor2, path_umount_impl + umount_anchor2, 1)
+                      print(f"  ✓ 已补丁: {path_umount_file} -> 移植 path_umount (锚点: SYSCALL_DEFINE2(umount))")
+                      path_umount_patched = True
+                  elif umount_anchor3 in ns_content:
+                      ns_content = ns_content.replace(umount_anchor3, path_umount_impl + umount_anchor3, 1)
+                      print(f"  ✓ 已补丁: {path_umount_file} -> 移植 path_umount (锚点: SYSCALL_DEFINE2(umount2))")
+                      path_umount_patched = True
+                  else:
+                      # 使用正则在 do_umount 函数之后插入
+                      import re as re_mod
+                      # 在 do_umount 函数结束后插入（找下一个函数的开头）
+                      match = re_mod.search(r'(static\s+long\s+do_umount\s*\(.*?\n\})', ns_content, re_mod.DOTALL)
+                      if match:
+                          insert_pos = match.end()
+                          ns_content = ns_content[:insert_pos] + '\n\n' + path_umount_impl + ns_content[insert_pos:]
+                          print(f"  ✓ 已补丁: {path_umount_file} -> 移植 path_umount (锚点: do_umount 函数后)")
+                          path_umount_patched = True
+                      else:
+                          print(f"  ⚠ 未找到 path_umount 插入锚点: {path_umount_file}")
+                          failed_files += 1
+
+                  if path_umount_patched:
+                      with open(path_umount_file, 'w') as f:
+                          f.write(ns_content)
+                      patched_files += 1
+              else:
+                  print(f"  ℹ path_umount 已存在，跳过: {path_umount_file}")
+                  # 确保已有 path_umount 有 EXPORT_SYMBOL
+                  with open(path_umount_file, 'r') as f:
+                      ns_content = f.read()
+                  if 'EXPORT_SYMBOL(path_umount)' not in ns_content and 'int path_umount' in ns_content:
+                      ns_content = ns_content.replace(
+                          'int path_umount(struct path *path, int flags)\n{',
+                          'int path_umount(struct path *path, int flags)\n{',
+                      )
+                      # 在 path_umount 函数结束后添加 EXPORT_SYMBOL
+                      import re as re_mod2
+                      ns_content = re_mod2.sub(
+                          r'(int path_umount\(struct path \*path, int flags\)\s*\{[^}]*\})',
+                          r'\1\nEXPORT_SYMBOL(path_umount);',
+                          ns_content,
+                          count=1,
+                      )
+                      with open(path_umount_file, 'w') as f:
+                          f.write(ns_content)
+                      print(f"  ✓ 已补丁: {path_umount_file} -> 添加 EXPORT_SYMBOL(path_umount)")
+                  path_umount_patched = True
+          else:
+              print(f"  ⚠ 文件不存在: {path_umount_file}")
+              failed_files += 1
+
+          if not path_umount_patched:
+              print("⚠ 警告: path_umount 移植失败，ReSukiSU 模块卸载功能将不可用")
+              print("   这不是致命错误，构建将继续")
+
+          print(f"\n=== 补丁总结 ===")
+          print(f"  成功补丁文件: {patched_files}")
+          print(f"  失败/跳过文件: {failed_files}")
+
+          if patched_files == 0:
+              print("⚠ 警告: 没有文件被成功补丁，KSU 手动钩子可能不完整")
+              print("   构建可能继续，但 ReSukiSU 功能可能受限")
+          else:
+              print("✓ 补丁应用完成")
+          PATCH_SCRIPT
+
+      - name: Enable KSU config and build kernel
+        id: build_kernel
+        run: |
+          cd kernel
+
+          DEVICE="${{ steps.device_env.outputs.device_name }}"
+
+          # 查找构建配置
+          echo "=== 查找构建配置 ==="
+          BUILD_CONFIG=""
+          for config in \
+            "private/msm-google/build.config.${DEVICE}" \
+            "private/devices/google/${DEVICE}/build.config.${DEVICE}" \
+            "build.config.${DEVICE}" \
+            "private/msm-google/build.config.flame"; do
+            if [ -f "$config" ]; then
+              BUILD_CONFIG="$config"
+              echo "找到构建配置: $BUILD_CONFIG"
+              break
+            fi
+          done
+
+          # 如果找不到设备特定配置，列出所有可用配置
+          if [ -z "$BUILD_CONFIG" ]; then
+            echo "未找到设备特定构建配置，列出所有可用配置:"
+            find . -name "build.config*" -type f 2>/dev/null | head -20
+            echo "::error::未找到构建配置文件"
+            exit 1
+          fi
+
+          echo "build_config=$BUILD_CONFIG" >> $GITHUB_OUTPUT
+
+          # 启用 KSU 配置
+          echo "=== 启用 KSU 配置 ==="
+          echo "参考: https://resukisu.github.io/zh-Hans/guide/manual-integrate.html"
+          echo ""
+          echo "Linux 4.14 内核配置策略:"
+          echo "  CONFIG_KSU=y                        (启用 KernelSU)"
+          echo "  CONFIG_KSU_MANUAL_HOOK=y            (启用手动钩子)"
+          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y   (自动 setuid hook，4.2~6.8 内核)"
+          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y   (自动 sys_read hook，4.2~6.8 内核)"
+          echo "  CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y    (自动 input hook)"
+
+          # 从构建配置中提取 DEFCONFIG 名称
+          DEFCONFIG_NAME=$(grep -E '^DEFCONFIG=' "$BUILD_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2)
+          if [ -z "$DEFCONFIG_NAME" ]; then
+            DEFCONFIG_NAME=$(grep -E 'DEFCONFIG=' "$BUILD_CONFIG" 2>/dev/null | head -1 | cut -d'=' -f2)
+          fi
+
+          if [ -n "$DEFCONFIG_NAME" ]; then
+            echo "Defconfig: $DEFCONFIG_NAME"
+            # 查找 defconfig 文件
+            DEFCONFIG_PATH=$(find . -name "$DEFCONFIG_NAME" -path "*/configs/*" -type f 2>/dev/null | head -1)
+            if [ -n "$DEFCONFIG_PATH" ]; then
+              echo "修改 defconfig: $DEFCONFIG_PATH"
+
+              # 核心 KSU 配置
+              echo "CONFIG_KSU=y" >> "$DEFCONFIG_PATH"
+              echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG_PATH"
+
+              # 自动钩子配置（4.14 在 4.2~6.8 范围内，使用自动 hook 而非手动 hook）
+              # setuid hook: 4.2~6.8 内核通过 LSM 自动应用
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y" >> "$DEFCONFIG_PATH"
+              # sys_read hook: 4.2~6.8 内核通过 LSM 自动应用（initrc hook）
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y" >> "$DEFCONFIG_PATH"
+              # input hook: input_handler 未损坏时自动应用
+              echo "CONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y" >> "$DEFCONFIG_PATH"
+
+              echo "已添加 KSU 配置到 defconfig（含自动钩子）"
+            else
+              echo "⚠ 未找到 defconfig 文件: $DEFCONFIG_NAME"
+              echo "将使用 POST_DEFCONFIG_CMDS 方式启用 KSU"
+            fi
+          fi
+
+          # 设置 BUILD_AOSP_KERNEL=1 从本地源码编译（而非使用预编译 GKI 内核）
+          export BUILD_AOSP_KERNEL=1
+
+          # 构建内核
+          echo "=== 开始编译内核 ==="
+          echo "构建配置: $BUILD_CONFIG"
+          echo "设备: ${{ steps.device_env.outputs.device_pretty }}"
+          echo "内核版本: 4.14"
+
+          set -o pipefail
+          BUILD_CONFIG="$BUILD_CONFIG" build/build.sh 2>&1 | tee build.log
+
+          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          if [ $BUILD_EXIT_CODE -ne 0 ]; then
+            echo "::error::内核编译失败，退出码: $BUILD_EXIT_CODE"
+            tail -100 build.log
+            exit $BUILD_EXIT_CODE
+          fi
+
+          echo "=== 编译成功 ==="
+
+      - name: Prepare artifacts
+        id: prepare_artifacts
+        run: |
+          cd kernel
+
+          # 查找输出目录
+          echo "=== 查找内核输出 ==="
+          DIST_DIR=""
+          for dir in \
+            "out/dist" \
+            "out/msm-4.14/dist" \
+            "out/android-msm/dist" \
+            "out/dist-private/msm-google"; do
+            if [ -d "$dir" ]; then
+              DIST_DIR="$dir"
+              echo "找到输出目录: $DIST_DIR"
+              break
+            fi
+          done
+
+          # 备用搜索：查找包含 .img 或 Image 的目录
+          if [ -z "$DIST_DIR" ]; then
+            echo "使用备用搜索查找输出目录..."
+            DIST_DIR=$(find out -name "boot.img" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            if [ -z "$DIST_DIR" ]; then
+              DIST_DIR=$(find out -name "Image.lz4" -o -name "Image.gz-dtb" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            fi
+          fi
+
+          if [ -z "$DIST_DIR" ] || [ ! -d "$DIST_DIR" ]; then
+            echo "列出 out 目录结构:"
+            find out -maxdepth 4 -type d 2>/dev/null | head -40
+            echo "::error::未找到内核输出目录"
+            exit 1
+          fi
+
+          echo "=== 输出文件 ==="
+          ls -lh "$DIST_DIR/"
+
+          # 创建输出目录
+          mkdir -p output
+          cp -v "$DIST_DIR"/* output/ 2>/dev/null || true
+
+          # 查找内核镜像
+          KERNEL_IMAGE=""
+          for img in \
+            "$DIST_DIR/Image.lz4" \
+            "$DIST_DIR/Image.gz-dtb" \
+            "$DIST_DIR/Image.gz" \
+            "$DIST_DIR/Image"; do
+            if [ -f "$img" ]; then
+              KERNEL_IMAGE="$img"
+              echo "找到内核镜像: $KERNEL_IMAGE"
+              break
+            fi
+          done
+
+          if [ -n "$KERNEL_IMAGE" ]; then
+            echo "kernel_image=$KERNEL_IMAGE" >> $GITHUB_OUTPUT
+          else
+            echo "⚠ 警告: 未找到标准内核镜像名称"
+            echo "搜索所有 Image 文件:"
+            find out -name "Image*" -type f 2>/dev/null | head -10
+          fi
+
+          # 生成构建信息
+          DEVICE="${{ steps.device_env.outputs.device_name }}"
+          echo "Pixel 4 Kernel Build Info" > output/build_info.txt
+          echo "=========================" >> output/build_info.txt
+          echo "Device: ${{ steps.device_env.outputs.device_pretty }}" >> output/build_info.txt
+          echo "Branch: ${{ steps.device_env.outputs.manifest_branch }}" >> output/build_info.txt
+          echo "Build Config: ${{ steps.build_kernel.outputs.build_config }}" >> output/build_info.txt
+          echo "Kernel Version: 4.14" >> output/build_info.txt
+          echo "Build Date: $(date)" >> output/build_info.txt
+          echo "ReSukiSU: always enabled" >> output/build_info.txt
+          echo "Build Number: ${{ github.run_number }}" >> output/build_info.txt
+
+          # 检查 .config 中是否包含 KSU
+          if [ -f "out/.config" ]; then
+            echo "" >> output/build_info.txt
+            echo "KSU Config Status:" >> output/build_info.txt
+            grep "CONFIG_KSU" out/.config >> output/build_info.txt 2>/dev/null || echo "KSU 未在 .config 中找到" >> output/build_info.txt
+          fi
+
+          # 清理源码释放空间
+          echo "=== 清理源码 ==="
+          rm -rf private build/kernel prebuilts/clang 2>/dev/null || true
+          df -h
+
+      - name: Download AnyKernel3
+        run: |
+          echo "=== 下载 AnyKernel3 ==="
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+      - name: Prepare AnyKernel3 package
+        id: prepare_ak3
+        run: |
+          DEVICE="${{ steps.device_env.outputs.device_name }}"
+          KERNEL_IMAGE="${{ steps.prepare_artifacts.outputs.kernel_image }}"
+
+          cd AnyKernel3
+
+          # 构建内核名称字符串
+          KERNEL_STRING="Pixel4-${DEVICE}-4.14 + ReSukiSU"
+          if [ -n "${{ github.event.inputs.kernel_name }}" ]; then
+            KERNEL_STRING="$KERNEL_STRING ${{ github.event.inputs.kernel_name }}"
+          fi
+
+          # 创建 anykernel.sh 配置
+          cat > anykernel.sh << EOF
+          kernelstring="$KERNEL_STRING"
+          do.modules=0
+          block=auto
+          do.devicecheck=0
+          do.clean=1
+          do.backup=1
+          EOF
+
+          echo "AnyKernel3 配置: $KERNEL_STRING"
+
+          # 复制内核镜像
+          if [ -n "$KERNEL_IMAGE" ] && [ -f "$KERNEL_IMAGE" ]; then
+            # AnyKernel3 期望内核文件名为 Image（arm64）
+            cp "$KERNEL_IMAGE" Image
+            echo "已复制内核镜像: $KERNEL_IMAGE"
+          else
+            echo "⚠ 警告: 未找到内核镜像，尝试从 output 目录复制"
+            for img in \
+              "$GITHUB_WORKSPACE/kernel/output/Image.lz4" \
+              "$GITHUB_WORKSPACE/kernel/output/Image.gz-dtb" \
+              "$GITHUB_WORKSPACE/kernel/output/Image.gz" \
+              "$GITHUB_WORKSPACE/kernel/output/Image"; do
+              if [ -f "$img" ]; then
+                cp "$img" Image
+                echo "已复制内核镜像: $img"
+                break
+              fi
+            done
+          fi
+
+          # 生成文件名
+          DATE=$(date +%Y%m%d)
+          ZIP_NAME="Pixel4-${DEVICE}-4.14-${DATE}-${{ github.run_number }}"
+          if [ -n "${{ github.event.inputs.kernel_name }}" ]; then
+            ZIP_NAME="${ZIP_NAME}-${{ github.event.inputs.kernel_name }}"
+          fi
+          ZIP_NAME="${ZIP_NAME}-ReSukiSU"
+
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+
+          # 打包
+          echo "=== 打包 AnyKernel3 ==="
+          zip -r9 "$ZIP_NAME.zip" * -x "*.git*" -x "*.md" -x "*README*"
+
+          ls -la
+          echo "=== 生成 $ZIP_NAME.zip ==="
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixel4-${{ steps.device_env.outputs.device_name }}-kernel
+          path: kernel/output/
+          retention-days: 7
+          compression-level: 9
+
+      - name: Upload AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare_ak3.outputs.zip_name }}
+          path: AnyKernel3/*.zip
+          retention-days: 7
+          compression-level: 0
+
+      - name: Create release
+        if: ${{ github.event.inputs.upload_to_release == 'true' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: pixel4-${{ steps.device_env.outputs.device_name }}-${{ github.run_number }}
+          name: Pixel 4 ${{ steps.device_env.outputs.device_pretty }} ReSukiSU #${{ github.run_number }}
+          body_path: kernel/output/build_info.txt
+          files: |
+            kernel/output/*
+            AnyKernel3/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post build summary
+        run: |
+          echo "## Pixel 4/4a/4 XL 构建完成 ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 设备 | ${{ steps.device_env.outputs.device_pretty }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 清单分支 | ${{ steps.device_env.outputs.manifest_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 构建配置 | ${{ steps.build_kernel.outputs.build_config }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 内核版本 | 4.14 |" >> $GITHUB_STEP_SUMMARY
+          echo "| ReSukiSU | 始终启用 |" >> $GITHUB_STEP_SUMMARY
+          echo "| AnyKernel3 | ${{ steps.prepare_ak3.outputs.zip_name }}.zip |" >> $GITHUB_STEP_SUMMARY
