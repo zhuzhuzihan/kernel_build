@@ -1,0 +1,113 @@
+name: Kernel Build (lineage-22.2 + AOSP Clang + ReSukisu)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Free disk space
+        run: |
+          echo "=== 清理不需要的软件包以释放空间 ==="
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android/sdk
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /opt/hostedtoolcache/go
+          sudo rm -rf /opt/hostedtoolcache/PyPy
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/hostedtoolcache/Ruby
+          sudo rm -rf /opt/hostedtoolcache/node
+          sudo rm -rf /opt/microsoft
+          sudo rm -rf /opt/pipx
+          sudo rm -rf /opt/google
+          sudo rm -rf /opt/az
+
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          sudo apt-get remove -y \
+            azure-cli \
+            google-chrome-stable \
+            firefox \
+            microsoft-edge-stable \
+            powershell \
+            temurin-8-jdk \
+            temurin-11-jdk \
+            temurin-17-jdk \
+            dotnet-sdk-* \
+            mono-complete \
+            2>/dev/null || true
+
+          echo "=== 磁盘空间状态 ==="
+          df -h
+
+      - name: Checkout kernel source
+        run: |
+          echo "=== 克隆内核源码 ==="
+          git clone https://github.com/zhuzhuzihan/android_kernel_xiaomi_msm8953.git -b lineage-22.2 --depth=1 .
+          echo "分支: $(git branch --show-current)"
+          echo "提交: $(git log -1 --oneline)"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex git \
+            libncurses5-dev libssl-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            python3 unzip zip
+
+      - name: Cache AOSP Clang
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ~/aosp-clang
+          key: aosp-clang-r450784d # 如果升级了 Clang 版本，请修改这个 key
+          save-always: true
+      # --- 优化：仅在缓存未命中时下载 ---
+      - name: Download AOSP Clang (r450784d from android13-release)
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            --depth=1 -b android13-release $HOME/aosp-clang
+
+      # --- 新增功能：配置 ccache ---
+      - name: Setup ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-kernel-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ccache-kernel-${{ runner.os }}-
+          save-always: true
+
+      - name: Apply KernelSU (KernelSU Next)
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          
+      - name: Set environment
+        run: |
+          echo "PATH=$HOME/aosp-clang/clang-r450784d/bin:$PATH" >> $GITHUB_ENV
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          echo "CC=ccache clang" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> $GITHUB_ENV
+          echo "LLVM=1" >> $GITHUB_ENV
+          echo "LLVM_IAS=1" >> $GITHUB_ENV
+
+      - name: Build kernel
+        run: |
+          mkdir -p out
+          make O=out sakura_defconfig
+          make O=out -j$(nproc) KCFLAGS=-Wno-error
+          ccache -s
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz-dtb
+          path: out/arch/arm64/boot/Image.gz-dtb

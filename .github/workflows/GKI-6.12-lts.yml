@@ -22,6 +22,11 @@ on:
           - thin
           - full
           - none
+      enable_resukisu:
+        description: 'Enable ReSukiSU support'
+        required: false
+        default: false
+        type: boolean
       kernel_name:
         description: 'Kernel name suffix'
         required: false
@@ -36,6 +41,7 @@ on:
 env:
   TARGET_ARCH: ${{ github.event.inputs.arch || 'arm64' }}
   LTO_CONFIG: ${{ github.event.inputs.build_lto || 'default' }}
+  ENABLE_RESUKISU: ${{ github.event.inputs.enable_resukisu || 'false' }}
   KERNEL_NAME: ${{ github.event.inputs.kernel_name || '' }}
 
 jobs:
@@ -78,20 +84,21 @@ jobs:
           echo "=== 下载 AnyKernel3 ==="
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           
-          # 配置 AnyKernel3
           cd AnyKernel3
           
-          # 根据架构设置
-          case "${{ env.TARGET_ARCH }}" in
-            arm64)   ARCH="arm64" ;;
-            x86_64)  ARCH="x86_64" ;;
-            riscv64) ARCH="riscv64" ;;
-          esac
+          # 构建内核名称
+          KERNEL_STRING="GKI 6.12 LTS"
+          if [ -n "${{ env.KERNEL_NAME }}" ]; then
+            KERNEL_STRING="$KERNEL_STRING ${{ env.KERNEL_NAME }}"
+          fi
+          if [ "${{ env.ENABLE_RESUKISU }}" = "true" ]; then
+            KERNEL_STRING="$KERNEL_STRING + ReSukiSU"
+          fi
           
           # 创建 anykernel.sh 配置
           cat > anykernel.sh << EOF
           # AnyKernel3 配置
-          kernelstring="GKI 6.12 LTS ${{ env.KERNEL_NAME }}"
+          kernelstring="$KERNEL_STRING"
           do.modules=0
           block=auto
           do.devicecheck=0
@@ -99,7 +106,7 @@ jobs:
           do.backup=1
           EOF
           
-          echo "AnyKernel3 准备完成"
+          echo "AnyKernel3 准备完成: $KERNEL_STRING"
 
       - name: Install repo tool
         run: |
@@ -133,16 +140,33 @@ jobs:
         run: |
           cd gki
           echo "=== 查看可用的编译目标 ==="
-          ls -la common/BUILD.bazel 2>/dev/null || echo "common/BUILD.bazel 不存在"
+          ./tools/bazel query "//common:*" 2>/dev/null | grep -E "kernel_" | head -20 || true
+
+      - name: Setup ReSukiSU
+        if: ${{ env.ENABLE_RESUKISU == 'true' }}
+        run: |
+          cd gki/common
           
-          # 检查 common 目录中的目标
-          if [ -f "common/BUILD.bazel" ]; then
-            echo "=== common 目录目标 ==="
-            grep -E "^(kernel_|name =)" common/BUILD.bazel | head -30 || true
+          echo "=== 集成 ReSukiSU ==="
+          
+          # 删除原有的 KernelSU 目录（如果存在）
+          rm -rf KernelSU 2>/dev/null || true
+          
+          # 执行 ReSukiSU 安装脚本
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          
+          # 检查是否成功
+          if [ -d "drivers/kernelsu" ]; then
+            echo "ReSukiSU 集成成功"
+            ls -la drivers/kernelsu/
+          else
+            echo "::error::ReSukiSU 集成失败"
+            exit 1
           fi
           
-          # 尝试查询目标
-          ./tools/bazel query "//common:*" 2>/dev/null | grep -E "kernel_" | head -20 || true
+          # 提交更改（避免 dirty 标记）
+          git add .
+          git commit -m "Add ReSukiSU support" || true
 
       - name: Build GKI kernel
         id: build_kernel
@@ -252,6 +276,9 @@ jobs:
           if [ -n "${{ env.KERNEL_NAME }}" ]; then
             ZIP_NAME="${ZIP_NAME}-${{ env.KERNEL_NAME }}"
           fi
+          if [ "${{ env.ENABLE_RESUKISU }}" = "true" ]; then
+            ZIP_NAME="${ZIP_NAME}-ReSukiSU"
+          fi
           
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           
@@ -282,9 +309,7 @@ jobs:
           for DIST_DIR in "out/$KERNEL_TARGET/dist" "out/dist" "out/common/$KERNEL_TARGET/dist"; do
             if [ -d "$DIST_DIR" ]; then
               echo "从 $DIST_DIR 复制文件"
-              # 只复制 Image
               cp -v $DIST_DIR/$IMAGE output/ 2>/dev/null || true
-              # 只复制 boot*.img
               cp -v $DIST_DIR/boot*.img output/ 2>/dev/null || true
             fi
           done
@@ -299,13 +324,7 @@ jobs:
           find out -name "boot-*.img" -exec cp -v {} output/ \; 2>/dev/null || true
           find out -name "boot.img" -exec cp -v {} output/ \; 2>/dev/null || true
           
-          # 复制 AnyKernel3 zip
-          AK3_ZIP="${{ steps.prepare_ak3.outputs.zip_name }}.zip"
-          if [ -f "$GITHUB_WORKSPACE/AnyKernel3/$AK3_ZIP" ]; then
-            cp "$GITHUB_WORKSPACE/AnyKernel3/$AK3_ZIP" output/
-          fi
-          
-          # 检查输出 - 只显示关键文件
+          # 检查输出
           echo "=== 输出文件 ==="
           ls -lh output/
           
@@ -326,19 +345,28 @@ jobs:
           echo "Build: ${{ github.run_number }}" >> output/build_info.txt
           echo "Date: $(date)" >> output/build_info.txt
           echo "Kernel Name: ${{ env.KERNEL_NAME }}" >> output/build_info.txt
+          echo "ReSukiSU: ${{ env.ENABLE_RESUKISU }}" >> output/build_info.txt
           
           # 清理源码释放空间
           echo "=== 清理源码 ==="
           rm -rf common build/kernel prebuilts/clang 2>/dev/null || true
           df -h
 
-      - name: Upload artifacts
+      - name: Upload kernel images
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.prepare_ak3.outputs.zip_name }}
+          name: kernel-images-${{ env.TARGET_ARCH }}
           path: gki/output/
           retention-days: 7
           compression-level: 9
+
+      - name: Upload AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare_ak3.outputs.zip_name }}
+          path: AnyKernel3/*.zip
+          retention-days: 7
+          compression-level: 0
 
       - name: Create release
         if: ${{ github.event.inputs.upload_to_release == 'true' }}
@@ -347,7 +375,9 @@ jobs:
           tag_name: gki-6.12-${{ env.TARGET_ARCH }}-${{ github.run_number }}
           name: GKI 6.12 ${{ env.TARGET_ARCH }} ${{ env.KERNEL_NAME }}#${{ github.run_number }}
           body_path: gki/output/build_info.txt
-          files: gki/output/*
+          files: |
+            gki/output/*
+            AnyKernel3/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -359,4 +389,5 @@ jobs:
           echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| 架构 | ${{ env.TARGET_ARCH }} |" >> $GITHUB_STEP_SUMMARY
           echo "| LTO | ${{ env.LTO_CONFIG }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 产物 | ${{ steps.prepare_ak3.outputs.zip_name }}.zip |" >> $GITHUB_STEP_SUMMARY
+          echo "| ReSukiSU | ${{ env.ENABLE_RESUKISU }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| AnyKernel3 | ${{ steps.prepare_ak3.outputs.zip_name }}.zip |" >> $GITHUB_STEP_SUMMARY
