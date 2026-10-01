@@ -7,6 +7,15 @@ out="$kernel/out"
 artifacts="$workspace/artifacts/raphael"
 enable_resukisu="${ENABLE_RESUKISU:-false}"
 kernel_name="${KERNEL_NAME:-}"
+mode="${1:-build}"
+
+case "$mode" in
+  build|--validate-link) ;;
+  *)
+    printf 'Usage: %s [--validate-link]\n' "$0" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! "$kernel_name" =~ ^[A-Za-z0-9._-]*$ ]]; then
   printf 'Kernel name may contain only letters, digits, dots, underscores and hyphens.\n' >&2
@@ -65,6 +74,7 @@ config="$kernel/scripts/config"
   --disable CFI \
   --disable CFI_CLANG \
   --disable BUILD_ARM64_APPENDED_DTB_IMAGE \
+  --enable MFD_SPK_ID \
   --enable KALLSYMS \
   --enable KALLSYMS_ALL
 
@@ -104,6 +114,11 @@ make -C "$kernel" "${make_args[@]}" olddefconfig \
   2>&1 | tee "$artifacts/configure.log"
 cp "$out/.config" "$artifacts/kernel.config"
 
+grep -Fxq 'CONFIG_MFD_SPK_ID=y' "$out/.config" || {
+  printf 'Required configuration is missing: CONFIG_MFD_SPK_ID=y\n' >&2
+  exit 1
+}
+
 if [[ "$enable_resukisu" == true ]]; then
   for symbol in KSU KSU_MANUAL_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
     KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK KALLSYMS_ALL; do
@@ -112,6 +127,39 @@ if [[ "$enable_resukisu" == true ]]; then
       exit 1
     }
   done
+fi
+
+if [[ "$mode" == --validate-link ]]; then
+  for symbol in GSI MODVERSIONS; do
+    grep -Fxq "CONFIG_$symbol=y" "$out/.config" || {
+      printf 'Required validation configuration is missing: CONFIG_%s=y\n' "$symbol" >&2
+      exit 1
+    }
+  done
+
+  make -C "$kernel" "${make_args[@]}" -j"$(nproc)" prepare scripts \
+    2>&1 | tee "$artifacts/link-prepare.log"
+  make -C "$kernel" "${make_args[@]}" -j"$(nproc)" \
+    drivers/platform/msm/gsi/gsi.o drivers/mfd/spk-id.o \
+    2>&1 | tee "$artifacts/link-objects.log"
+
+  llvm-nm --defined-only "$out/drivers/platform/msm/gsi/gsi.o" \
+    | tee "$artifacts/link-gsi-symbols.log" \
+    | grep -E '^[[:xdigit:]]+[[:space:]]+[Aa][[:space:]]+__crc_gsi_write_channel_scratch$' || {
+      printf 'GSI symbol CRC was not generated.\n' >&2
+      exit 1
+    }
+
+  llvm-nm --defined-only "$out/drivers/mfd/spk-id.o" \
+    | tee "$artifacts/link-spk-symbols.log" \
+    | grep -E '^[[:xdigit:]]+[[:space:]]+T[[:space:]]+spk_id_get$' || {
+      printf 'Speaker ID provider symbol is missing.\n' >&2
+      exit 1
+    }
+
+  printf 'GSI CRC and speaker ID symbol validation passed.\n' \
+    | tee "$artifacts/link-check.log"
+  exit 0
 fi
 
 make -C "$kernel" "${make_args[@]}" -j"$(nproc)" Image.gz \

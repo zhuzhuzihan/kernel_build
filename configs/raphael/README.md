@@ -35,6 +35,10 @@ configuration, uses explicit Clang/LLD and LLVM utility selections, and
 provides GNU ARM64/ARM32 cross-binutils for this kernel's external assembler.
 Host tools use `-fcommon` for compatibility with the legacy DTC sources.
 
+The build enables `CONFIG_MFD_SPK_ID=y` for the Xiaomi speaker ID driver.
+The source's SM8150 audio configuration builds TAS2557 and CS35L41 codecs
+that call `spk_id_get`, so its provider must be built into the kernel too.
+
 The workflow always applies `patch/raphael/clang17-fts-prototypes.patch`.
 It gives the ST touchscreen driver's `getDev`, `getClient` and `timestamp`
 definitions explicit `(void)` parameter lists to match their existing header
@@ -44,6 +48,21 @@ It also applies `patch/raphael/clang17-vservices-unused-transport.patch`,
 which removes an unused local `transport` pointer and assignment from
 `vs_session_handle_message`. The vservices driver enables `-Werror` locally,
 so Clang 17's `-Wunused-but-set-variable` diagnostic otherwise stops the build.
+
+`patch/raphael/clang17-gsi-genksyms.patch` removes a redundant `__packed`
+attribute from the return type of `__gsi_update_mhi_channel_scratch`.
+The union declaration already defines its packed layout. The legacy
+genksyms parser cannot handle that return-type attribute and fails to generate
+the CRC for `gsi_write_channel_scratch`, causing an `R_AARCH64_ABS32` relocation
+error during the final LLD link with `CONFIG_MODVERSIONS=y`.
+
+The temporary link-validation workflow first checks the build script's shell
+syntax, then runs `scripts/build-raphael.sh --validate-link` with AOSP Clang 17.
+This checks the effective configuration, builds the GSI and speaker ID objects,
+and requires a defined absolute `__crc_gsi_write_channel_scratch` plus the
+`spk_id_get` provider symbol. It then performs the complete `Image.gz` build
+and AnyKernel3 packaging. Validation logs and symbol tables are uploaded with
+the other build artifacts.
 
 ReSukiSU is optional and disabled by default. Enabling it installs the
 selected ReSukiSU ref, applies `patch/raphael/resukisu-manual-hooks-4.14.patch`,
