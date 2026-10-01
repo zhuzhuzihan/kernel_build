@@ -35,6 +35,11 @@ configuration, uses explicit Clang/LLD and LLVM utility selections, and
 provides GNU ARM64/ARM32 cross-binutils for this kernel's external assembler.
 Host tools use `-fcommon` for compatibility with the legacy DTC sources.
 
+The workflow always applies `patch/raphael/clang17-fts-prototypes.patch`.
+It gives the ST touchscreen driver's `getDev`, `getClient` and `timestamp`
+definitions explicit `(void)` parameter lists to match their existing header
+declarations and satisfy Clang 17's `-Werror=strict-prototypes` check.
+
 ReSukiSU is optional and disabled by default. Enabling it installs the
 selected ReSukiSU ref, applies `patch/raphael/resukisu-manual-hooks-4.14.patch`,
 and enables manual hooks plus automatic input, setuid and init.rc hooks.

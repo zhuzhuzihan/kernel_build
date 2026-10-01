@@ -113,6 +113,12 @@ jobs:
           path: kernel
           fetch-depth: 1
 
+      - name: Apply Clang 17 compatibility patch
+        working-directory: kernel
+        run: |
+          git apply --verbose \
+            "$GITHUB_WORKSPACE/patch/raphael/clang17-fts-prototypes.patch"
+
       - name: Setup ReSukiSU and apply manual hooks
         if: ${{ inputs.enable_resukisu }}
         working-directory: kernel
