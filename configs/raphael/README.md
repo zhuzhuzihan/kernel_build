@@ -40,6 +40,11 @@ It gives the ST touchscreen driver's `getDev`, `getClient` and `timestamp`
 definitions explicit `(void)` parameter lists to match their existing header
 declarations and satisfy Clang 17's `-Werror=strict-prototypes` check.
 
+It also applies `patch/raphael/clang17-vservices-unused-transport.patch`,
+which removes an unused local `transport` pointer and assignment from
+`vs_session_handle_message`. The vservices driver enables `-Werror` locally,
+so Clang 17's `-Wunused-but-set-variable` diagnostic otherwise stops the build.
+
 ReSukiSU is optional and disabled by default. Enabling it installs the
 selected ReSukiSU ref, applies `patch/raphael/resukisu-manual-hooks-4.14.patch`,
 and enables manual hooks plus automatic input, setuid and init.rc hooks.
