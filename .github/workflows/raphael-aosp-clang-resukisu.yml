@@ -168,6 +168,7 @@ jobs:
             echo "| 内核版本 | $KERNEL_RELEASE |"
             echo '| 编译器 | AOSP Clang 17.0.2 / LLD 17.0.2, build 10087095 |'
             echo '| 配置来源 | configs/raphael/boot.config（提取的 IKCONFIG） |'
+            echo '| 平台适配 | MACH_XIAOMI_RAPHAEL=y、MFD_SPK_ID=y，检查 Xiaomi/SM8150 依赖 |'
             echo '| 源码补丁 | 无 |'
             echo "| AnyKernel3 | $PACKAGE_NAME.zip |"
           } >> "$GITHUB_STEP_SUMMARY"
