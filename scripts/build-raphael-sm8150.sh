@@ -42,15 +42,21 @@ case "$variant" in
 esac
 
 verify_source() {
-  if [[ "$enable_resukisu" == true ]]; then
+  if [[ "$enable_resukisu" == true || "$variant" == crdroid15 ]]; then
     git -C "$kernel" diff --binary HEAD \
       | cmp - "$artifacts/kernel-source.patch"
+  else
+    git -C "$kernel" diff --exit-code HEAD
+  fi
+  if [[ "$variant" == crdroid15 ]]; then
+    git -C "$kernel" apply --reverse --check \
+      "$workspace/patch/raphael/crdroid15-extracted-config.patch"
+  fi
+  if [[ "$enable_resukisu" == true ]]; then
     git -C "$kernel" apply --reverse --check \
       "$workspace/$RESUKISU_HOOK_PATCH"
     git -C "$kernel/KernelSU" diff --exit-code HEAD
     git -C "$kernel/KernelSU" diff --cached --exit-code
-  else
-    git -C "$kernel" diff --exit-code HEAD
   fi
   git -C "$kernel" diff --cached --exit-code
 }
@@ -145,8 +151,11 @@ fi
     printf 'Source patches: ReSukiSU driver registration and manual hooks\n'
     printf 'Hook patch: %s\n' "$RESUKISU_HOOK_PATCH"
     printf 'ReSukiSU configuration: KSU=y KSU_MANUAL_HOOK=y; automatic input/setuid/init.rc hooks; KALLSYMS_ALL=y\n'
-  else
+  elif [[ "$variant" != crdroid15 ]]; then
     printf 'Source patches: none\n'
+  fi
+  if [[ "$variant" == crdroid15 ]]; then
+    printf 'Configuration compatibility patch: patch/raphael/crdroid15-extracted-config.patch\n'
   fi
   printf 'Configuration source: %s (extracted IKCONFIG)\n' "$KERNEL_CONFIG"
   if [[ "$variant" == lineage22 ]]; then

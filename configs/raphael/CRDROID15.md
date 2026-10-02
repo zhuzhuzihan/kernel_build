@@ -38,6 +38,24 @@ The source defaults `POLLY_CLANG` to `y`, while the extracted boot config does
 not enable Polly. The copy explicitly disables it for the matching AOSP
 toolchain.
 
+## Compatibility fixes for the extracted configuration
+
+The first CI attempt passed the boot-toolchain, effective-config and manual
+hook checks, then found two source issues when retaining the extracted
+configuration's tracing and SchedTune options.
+`patch/raphael/crdroid15-extracted-config.patch`:
+
+- Removes stale ARM64 Makefile references to `perf_trace_counters.c` and
+  `perf_trace_user.c`, neither of which exists in this source. Standard
+  hardware perf events and tracing remain enabled.
+- Supplies the missing `schedtune_prefer_high_cap` helper using the existing
+  positive per-task boost policy, matching the CPU-selection code's intent.
+  The extracted configuration's `SCHED_TUNE=y` remains enabled.
+
+CI applies these fixes in both crDroid build modes and records them with the
+integration diff. Verified AOSP compiler archives are cached before kernel
+compilation so failed kernel attempts can reuse the same boot compiler.
+
 ## ReSukiSU adaptation
 
 The crDroid source contains a bundled legacy KernelSU driver and old

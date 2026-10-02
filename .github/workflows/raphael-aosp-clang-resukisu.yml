@@ -79,7 +79,7 @@ jobs:
 
       - name: Cache AOSP Clang
         id: cache_clang
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/aosp-clang/${{ env.CLANG_REVISION }}
           key: aosp-clang-${{ runner.os }}-${{ env.CLANG_REVISION }}-${{ env.CLANG_COMMIT }}
@@ -106,6 +106,13 @@ jobs:
           "$TOOLCHAIN/bin/ld.lld" --version | tee "$RUNNER_TEMP/lld-version.txt"
           grep -F "LLD $CLANG_VERSION" "$RUNNER_TEMP/lld-version.txt"
           echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
+
+      - name: Cache verified AOSP Clang toolchain
+        if: steps.cache_clang.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/aosp-clang/${{ env.CLANG_REVISION }}
+          key: ${{ steps.cache_clang.outputs.cache-primary-key }}
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -149,13 +156,23 @@ jobs:
           git apply "$GITHUB_WORKSPACE/$RESUKISU_HOOK_PATCH"
           git diff --binary HEAD > "$GITHUB_WORKSPACE/artifacts/raphael/kernel-source.patch"
 
+      - name: Apply crDroid extracted-config compatibility fixes
+        id: config_compat
+        if: ${{ inputs.kernel_source == 'crdroid15' }}
+        working-directory: kernel
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/raphael"
+          git apply --check "$GITHUB_WORKSPACE/patch/raphael/crdroid15-extracted-config.patch"
+          git apply "$GITHUB_WORKSPACE/patch/raphael/crdroid15-extracted-config.patch"
+          git diff --binary HEAD > "$GITHUB_WORKSPACE/artifacts/raphael/kernel-source.patch"
+
       - name: Configure and build kernel
         id: build_kernel
         run: bash scripts/build-raphael-sm8150.sh
 
       - name: Verify source matches intended integration
         id: verify_source
-        if: ${{ always() && steps.kernel_source.outcome == 'success' && (!inputs.enable_resukisu || steps.setup_resukisu.outcome == 'success') }}
+        if: ${{ always() && steps.kernel_source.outcome == 'success' && (!inputs.enable_resukisu || steps.setup_resukisu.outcome == 'success') && (inputs.kernel_source != 'crdroid15' || steps.config_compat.outcome == 'success') }}
         run: bash scripts/build-raphael-sm8150.sh --verify-source
 
       - name: Package AnyKernel3
@@ -229,6 +246,8 @@ jobs:
             if [ "$ENABLE_RESUKISU" = true ]; then
               echo "| ReSukiSU ref | $RESUKISU_REF |"
               echo '| 集成方式 | exec/stat/faccessat/reboot 手动钩子；input/setuid/init.rc 自动钩子 |'
+            elif [ "$KERNEL_VARIANT" = crdroid15 ]; then
+              echo '| 源码补丁 | crDroid 提取配置兼容修复 |'
             else
               echo '| 源码补丁 | 无 |'
             fi
