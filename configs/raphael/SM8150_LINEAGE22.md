@@ -8,6 +8,9 @@
   [CI run 36953672838](https://github.com/zhuzhuzihan/kernel_build/actions/runs/36953672838).
 - ReSukiSU experiment branch: `tmp/sm8150-lineage22-resukisu-ci`.
 - Compiler/linker: AOSP Clang/LLD 17.0.2, build 10087095.
+- Workflow source choice: `kernel_source=lineage22`; an empty `kernel_ref`
+  selects `lineage-22.2`. The additional `crdroid15` source uses the separate
+  EvolutionX boot config and Clang 18 toolchain described in `CRDROID15.md`.
 
 The workflow runs `scripts/build-raphael-sm8150.sh`. It seeds
 `kernel/out/.config` from the extracted IKCONFIG in

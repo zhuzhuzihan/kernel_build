@@ -5,15 +5,48 @@ workspace="${GITHUB_WORKSPACE:-$(pwd)}"
 kernel="$workspace/kernel"
 out="$kernel/out"
 artifacts="$workspace/artifacts/raphael"
-source_repo="${KERNEL_REPOSITORY:-xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150}"
 enable_resukisu="${ENABLE_RESUKISU:-false}"
+variant="${KERNEL_VARIANT:-lineage22}"
+platform_symbols=(ARCH_SM8150 MACH_XIAOMI MACH_XIAOMI_SM8150 MACH_XIAOMI_RAPHAEL)
+
+case "$variant" in
+  lineage22)
+    KERNEL_REPOSITORY=xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150
+    KERNEL_REF="${KERNEL_REF:-lineage-22.2}"
+    KERNEL_CONFIG=configs/raphael/boot.config
+    RESUKISU_HOOK_PATCH=patch/raphael/resukisu-manual-hooks-4.14.patch
+    CLANG_REVISION=clang-r487747c
+    CLANG_COMMIT=425c8149f17c8d9914bf690b4d5abe45a13fb993
+    CLANG_VERSION=17.0.2
+    CLANG_BUILD=10087095
+    KERNEL_FLAVOR=Lineage22
+    ARTIFACT_PREFIX=raphael-sm8150-lineage22
+    platform_symbols+=(MFD_SPK_ID)
+    ;;
+  crdroid15)
+    KERNEL_REPOSITORY=crdroidandroid/android_kernel_xiaomi_sm8150
+    KERNEL_REF="${KERNEL_REF:-15.0-raphael}"
+    KERNEL_CONFIG=configs/raphael/evolutionx-15.0-20250609.config
+    RESUKISU_HOOK_PATCH=patch/raphael/resukisu-crdroid15-hooks.patch
+    CLANG_REVISION=clang-r522817
+    CLANG_COMMIT=921f6da692b1ffc96a0daa7e741373f0089d40b0
+    CLANG_VERSION=18.0.1
+    CLANG_BUILD=11967740
+    KERNEL_FLAVOR=crDroid15
+    ARTIFACT_PREFIX=raphael-sm8150-crdroid15
+    ;;
+  *)
+    printf 'Unknown kernel source profile: %s\n' "$variant" >&2
+    exit 2
+    ;;
+esac
 
 verify_source() {
   if [[ "$enable_resukisu" == true ]]; then
     git -C "$kernel" diff --binary HEAD \
       | cmp - "$artifacts/kernel-source.patch"
     git -C "$kernel" apply --reverse --check \
-      "$workspace/patch/raphael/resukisu-manual-hooks-4.14.patch"
+      "$workspace/$RESUKISU_HOOK_PATCH"
     git -C "$kernel/KernelSU" diff --exit-code HEAD
     git -C "$kernel/KernelSU" diff --cached --exit-code
   else
@@ -24,12 +57,19 @@ verify_source() {
 
 case "${1:-build}" in
   build) ;;
+  --export-profile)
+    for name in KERNEL_REPOSITORY KERNEL_REF KERNEL_CONFIG RESUKISU_HOOK_PATCH \
+      CLANG_REVISION CLANG_COMMIT CLANG_VERSION CLANG_BUILD KERNEL_FLAVOR ARTIFACT_PREFIX; do
+      printf '%s=%s\n' "$name" "${!name}" | tee -a "${GITHUB_ENV:?}"
+    done
+    exit 0
+    ;;
   --verify-source)
     verify_source
     exit 0
     ;;
   *)
-    printf 'Usage: %s [--verify-source]\n' "$0" >&2
+    printf 'Usage: %s [--export-profile | --verify-source]\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -62,14 +102,19 @@ make_args=(
 mkdir -p "$out" "$artifacts"
 verify_source
 
-cp "$workspace/configs/raphael/boot.config" "$out/.config"
-cp "$workspace/configs/raphael/boot.config" "$artifacts/boot.config"
+cp "$workspace/$KERNEL_CONFIG" "$out/.config"
+cp "$workspace/$KERNEL_CONFIG" "$artifacts/boot.config"
 
 # Raphael selects the Xiaomi SM8150 and Xiaomi platform symbols through Kconfig.
 # The audio codecs also require the built-in Xiaomi speaker ID provider.
-"$kernel/scripts/config" --file "$out/.config" \
-  --enable MACH_XIAOMI_RAPHAEL \
-  --enable MFD_SPK_ID
+if [[ "$variant" == lineage22 ]]; then
+  "$kernel/scripts/config" --file "$out/.config" \
+    --enable MACH_XIAOMI_RAPHAEL \
+    --enable MFD_SPK_ID
+else
+  # crDroid defaults to Polly; the extracted boot config does not enable it.
+  "$kernel/scripts/config" --file "$out/.config" --disable POLLY_CLANG
+fi
 
 if [[ "$enable_resukisu" == true ]]; then
   "$kernel/scripts/config" --file "$out/.config" \
@@ -82,12 +127,15 @@ if [[ "$enable_resukisu" == true ]]; then
     --enable KALLSYMS_ALL \
     --disable KSU_TRACEPOINT_HOOK \
     --disable KSU_SUSFS
+else
+  "$kernel/scripts/config" --file "$out/.config" --disable KSU
 fi
 
 {
   printf 'Raphael SM8150 build\n'
-  printf 'Source: https://github.com/%s\n' "$source_repo"
-  printf 'Source ref: %s\n' "${KERNEL_REF:-lineage-22.2}"
+  printf 'Source profile: %s\n' "$variant"
+  printf 'Source: https://github.com/%s\n' "$KERNEL_REPOSITORY"
+  printf 'Source ref: %s\n' "$KERNEL_REF"
   printf 'Source commit: %s\n' "$(git -C "$kernel" rev-parse HEAD)"
   printf 'ReSukiSU enabled: %s\n' "$enable_resukisu"
   if [[ "$enable_resukisu" == true ]]; then
@@ -95,16 +143,23 @@ fi
     printf 'ReSukiSU ref: %s\n' "$RESUKISU_REF"
     printf 'ReSukiSU commit: %s\n' "$(git -C "$kernel/KernelSU" rev-parse HEAD)"
     printf 'Source patches: ReSukiSU driver registration and manual hooks\n'
-    printf 'Hook patch: patch/raphael/resukisu-manual-hooks-4.14.patch\n'
+    printf 'Hook patch: %s\n' "$RESUKISU_HOOK_PATCH"
     printf 'ReSukiSU configuration: KSU=y KSU_MANUAL_HOOK=y; automatic input/setuid/init.rc hooks; KALLSYMS_ALL=y\n'
   else
     printf 'Source patches: none\n'
   fi
-  printf 'Configuration source: configs/raphael/boot.config (extracted IKCONFIG)\n'
-  printf 'Configuration overrides: MACH_XIAOMI_RAPHAEL=y MFD_SPK_ID=y\n'
+  printf 'Configuration source: %s (extracted IKCONFIG)\n' "$KERNEL_CONFIG"
+  if [[ "$variant" == lineage22 ]]; then
+    printf 'Configuration overrides: MACH_XIAOMI_RAPHAEL=y MFD_SPK_ID=y\n'
+  else
+    printf 'Configuration overrides: POLLY_CLANG=n (matching AOSP boot toolchain)\n'
+  fi
+  printf 'Configuration SHA256: %s\n' "$(sha256sum "$workspace/$KERNEL_CONFIG")"
   printf 'Configuration normalization: olddefconfig\n'
   printf 'Compiler: %s\n' "$(clang --version)"
   printf 'Linker: %s\n' "$(ld.lld --version)"
+  printf 'Toolchain revision: %s; build: %s; prebuilt commit: %s\n' \
+    "$CLANG_REVISION" "$CLANG_BUILD" "$CLANG_COMMIT"
   printf 'Date: %s\n' "$(date -u +%FT%TZ)"
   printf 'Make arguments:'
   printf ' %q' "${make_args[@]}"
@@ -117,14 +172,17 @@ cp "$out/.config" "$artifacts/kernel.config"
 
 printf 'Required platform configuration after olddefconfig:\n' \
   | tee "$artifacts/platform-config.log"
-for symbol in ARCH_SM8150 MACH_XIAOMI MACH_XIAOMI_SM8150 \
-  MACH_XIAOMI_RAPHAEL MFD_SPK_ID; do
+for symbol in "${platform_symbols[@]}"; do
   grep -Fx "CONFIG_$symbol=y" "$out/.config" \
     | tee -a "$artifacts/platform-config.log" || {
       printf 'Required configuration is missing: CONFIG_%s=y\n' "$symbol" >&2
       exit 1
     }
 done
+
+if [[ "$variant" == crdroid15 ]]; then
+  grep -Fx '# CONFIG_POLLY_CLANG is not set' "$out/.config"
+fi
 
 if [[ "$enable_resukisu" == true ]]; then
   printf 'Required ReSukiSU configuration after olddefconfig:\n' \

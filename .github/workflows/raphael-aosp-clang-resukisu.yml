@@ -1,12 +1,20 @@
-name: Raphael SM8150 Lineage 22.2 Build (AOSP Clang 17 + ReSukiSU)
+name: Raphael SM8150 Build (Lineage / crDroid + ReSukiSU)
 
 on:
   workflow_dispatch:
     inputs:
-      kernel_ref:
-        description: 'xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150 分支、标签或提交'
+      kernel_source:
+        description: '内核来源及对应 boot 配置、工具链'
         required: true
-        default: 'lineage-22.2'
+        default: 'lineage22'
+        type: choice
+        options:
+          - lineage22
+          - crdroid15
+      kernel_ref:
+        description: '分支、标签或提交；留空使用所选来源的默认分支'
+        required: false
+        default: ''
         type: string
       enable_resukisu:
         description: '集成 ReSukiSU 手动钩子'
@@ -28,12 +36,8 @@ permissions:
   contents: write
 
 env:
-  # boot.img: Android (10087095, +pgo, +bolt, +lto, -mlgo, based on r487747c)
-  # These optimization tags describe the compiler binary, not kernel flags.
-  CLANG_REVISION: clang-r487747c
-  CLANG_COMMIT: 425c8149f17c8d9914bf690b4d5abe45a13fb993
+  KERNEL_VARIANT: ${{ inputs.kernel_source }}
   KERNEL_REF: ${{ inputs.kernel_ref }}
-  KERNEL_REPOSITORY: xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150
   ENABLE_RESUKISU: ${{ inputs.enable_resukisu }}
   RESUKISU_REF: ${{ inputs.resukisu_ref }}
   KBUILD_BUILD_USER: nobody
@@ -55,6 +59,9 @@ jobs:
       - name: Validate build script syntax
         run: bash -n scripts/build-raphael-sm8150.sh
 
+      - name: Select source, extracted config and matching boot toolchain
+        run: bash scripts/build-raphael-sm8150.sh --export-profile
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc
@@ -74,10 +81,10 @@ jobs:
         id: cache_clang
         uses: actions/cache@v4
         with:
-          path: ~/aosp-clang/clang-r487747c
+          path: ~/aosp-clang/${{ env.CLANG_REVISION }}
           key: aosp-clang-${{ runner.os }}-${{ env.CLANG_REVISION }}-${{ env.CLANG_COMMIT }}
 
-      - name: Download AOSP Clang 17.0.2 (build 10087095)
+      - name: Download matching AOSP Clang
         if: steps.cache_clang.outputs.cache-hit != 'true'
         run: |
           TOOLCHAIN="$HOME/aosp-clang/$CLANG_REVISION"
@@ -91,16 +98,19 @@ jobs:
       - name: Configure toolchain environment
         run: |
           TOOLCHAIN="$HOME/aosp-clang/$CLANG_REVISION"
-          test -f "$TOOLCHAIN/manifest_10087095.xml"
-          grep -Fx '17.0.2' "$TOOLCHAIN/AndroidVersion.txt"
-          "$TOOLCHAIN/bin/clang" --version
-          "$TOOLCHAIN/bin/ld.lld" --version
+          test -f "$TOOLCHAIN/manifest_$CLANG_BUILD.xml"
+          grep -Fx "$CLANG_VERSION" "$TOOLCHAIN/AndroidVersion.txt"
+          "$TOOLCHAIN/bin/clang" --version | tee "$RUNNER_TEMP/clang-version.txt"
+          grep -F "Android ($CLANG_BUILD," "$RUNNER_TEMP/clang-version.txt"
+          grep -F "clang version $CLANG_VERSION" "$RUNNER_TEMP/clang-version.txt"
+          "$TOOLCHAIN/bin/ld.lld" --version | tee "$RUNNER_TEMP/lld-version.txt"
+          grep -F "LLD $CLANG_VERSION" "$RUNNER_TEMP/lld-version.txt"
           echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: raphael-sm8150-lineage22-${{ inputs.kernel_ref }}-clang-r487747c
+          key: ${{ env.ARTIFACT_PREFIX }}-${{ env.KERNEL_REF }}-${{ env.CLANG_REVISION }}
           max-size: 2G
 
       - name: Checkout raphael kernel source
@@ -108,7 +118,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.KERNEL_REPOSITORY }}
-          ref: ${{ inputs.kernel_ref }}
+          ref: ${{ env.KERNEL_REF }}
           path: kernel
           fetch-depth: 1
 
@@ -120,15 +130,23 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/artifacts/raphael"
           git diff --exit-code HEAD
           git diff --cached --exit-code
-          curl --fail --location --retry 3 --retry-all-errors \
-            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/$RESUKISU_REF/kernel/setup.sh" \
-            --output "$RUNNER_TEMP/setup-resukisu.sh"
-          bash "$RUNNER_TEMP/setup-resukisu.sh" "$RESUKISU_REF" \
-            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/raphael/resukisu-setup.log"
+          if [ "$KERNEL_VARIANT" = crdroid15 ]; then
+            {
+              git clone https://github.com/ReSukiSU/ReSukiSU.git KernelSU
+              git -C KernelSU checkout "$RESUKISU_REF"
+              ln -s ../KernelSU/kernel drivers/resukisu
+            } 2>&1 | tee "$GITHUB_WORKSPACE/artifacts/raphael/resukisu-setup.log"
+          else
+            curl --fail --location --retry 3 --retry-all-errors \
+              "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/$RESUKISU_REF/kernel/setup.sh" \
+              --output "$RUNNER_TEMP/setup-resukisu.sh"
+            bash "$RUNNER_TEMP/setup-resukisu.sh" "$RESUKISU_REF" \
+              2>&1 | tee "$GITHUB_WORKSPACE/artifacts/raphael/resukisu-setup.log"
+          fi
           test "$(git -C KernelSU rev-parse HEAD)" = \
             "$(git -C KernelSU rev-parse "$RESUKISU_REF^{commit}")"
-          git apply --check "$GITHUB_WORKSPACE/patch/raphael/resukisu-manual-hooks-4.14.patch"
-          git apply "$GITHUB_WORKSPACE/patch/raphael/resukisu-manual-hooks-4.14.patch"
+          git apply --check "$GITHUB_WORKSPACE/$RESUKISU_HOOK_PATCH"
+          git apply "$GITHUB_WORKSPACE/$RESUKISU_HOOK_PATCH"
           git diff --binary HEAD > "$GITHUB_WORKSPACE/artifacts/raphael/kernel-source.patch"
 
       - name: Configure and build kernel
@@ -148,14 +166,15 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cp anykernel/raphael/anykernel.sh AnyKernel3/anykernel.sh
           cp artifacts/raphael/Image.gz AnyKernel3/Image.gz
-          KERNEL_STRING="Raphael SM8150 $KERNEL_RELEASE (AOSP Clang 17.0.2)"
+          KERNEL_STRING="Raphael SM8150 $KERNEL_FLAVOR $KERNEL_RELEASE (AOSP Clang $CLANG_VERSION)"
           ROOT_SUFFIX=""
           if [ "$ENABLE_RESUKISU" = true ]; then
             KERNEL_STRING="$KERNEL_STRING + ReSukiSU"
             ROOT_SUFFIX="-ReSukiSU"
           fi
           sed -i "s|@KERNEL_STRING@|$KERNEL_STRING|" AnyKernel3/anykernel.sh
-          PACKAGE_NAME="Raphael-SM8150-Lineage22-${KERNEL_RELEASE}${ROOT_SUFFIX}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          PACKAGE_RELEASE="${KERNEL_RELEASE//\//-}"
+          PACKAGE_NAME="Raphael-SM8150-${KERNEL_FLAVOR}-${PACKAGE_RELEASE}${ROOT_SUFFIX}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
           echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
           cd AnyKernel3
           zip -r9 "$GITHUB_WORKSPACE/artifacts/raphael/$PACKAGE_NAME.zip" . \
@@ -165,7 +184,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: raphael-sm8150-lineage22-${{ github.run_number }}
+          name: ${{ env.ARTIFACT_PREFIX }}-${{ github.run_number }}
           path: artifacts/raphael/
           if-no-files-found: warn
           retention-days: 7
@@ -175,8 +194,8 @@ jobs:
         if: ${{ inputs.upload_to_release }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: raphael-sm8150-lineage22-${{ github.run_number }}-${{ github.run_attempt }}
-          name: Raphael SM8150 ${{ steps.build_kernel.outputs.kernel_release }}
+          tag_name: ${{ env.ARTIFACT_PREFIX }}-${{ github.run_number }}-${{ github.run_attempt }}
+          name: Raphael SM8150 ${{ env.KERNEL_FLAVOR }} ${{ steps.build_kernel.outputs.kernel_release }}
           body_path: artifacts/raphael/build_info.txt
           files: |
             artifacts/raphael/Image.gz
@@ -195,7 +214,7 @@ jobs:
           SOURCE_CHECK_STATUS: ${{ steps.verify_source.outcome }}
         run: |
           {
-            echo '## Raphael SM8150 lineage-22.2 build'
+            echo "## Raphael SM8150 $KERNEL_FLAVOR build"
             echo
             echo '| 项目 | 值 |'
             echo '|------|-----|'
@@ -203,9 +222,8 @@ jobs:
             echo "| 源码仓库 | $KERNEL_REPOSITORY |"
             echo "| 源码 ref | $KERNEL_REF |"
             echo "| 内核版本 | $KERNEL_RELEASE |"
-            echo '| 编译器 | AOSP Clang 17.0.2 / LLD 17.0.2, build 10087095 |'
-            echo '| 配置来源 | configs/raphael/boot.config（提取的 IKCONFIG） |'
-            echo '| 平台适配 | MACH_XIAOMI_RAPHAEL=y、MFD_SPK_ID=y，检查 Xiaomi/SM8150 依赖 |'
+            echo "| 编译器 | AOSP Clang/LLD $CLANG_VERSION, build $CLANG_BUILD ($CLANG_REVISION) |"
+            echo "| 配置来源 | $KERNEL_CONFIG（提取的 IKCONFIG） |"
             echo "| 源码检查 | $SOURCE_CHECK_STATUS |"
             echo "| ReSukiSU | $ENABLE_RESUKISU |"
             if [ "$ENABLE_RESUKISU" = true ]; then
