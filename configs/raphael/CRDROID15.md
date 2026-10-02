@@ -53,6 +53,10 @@ configuration's tracing and SchedTune options.
   The extracted configuration's `SCHED_TUNE=y` remains enabled.
 - Restores the WALT `schedtune_task_colocated` accessor by reading the existing
   cgroup colocation flag under RCU, and includes its declaration in WALT.
+- Aligns SchedTune cgroup registration with `SCHED_TUNE`, the option used to
+  compile its implementation, instead of the obsolete `CGROUP_SCHEDTUNE` name.
+- Removes cpufreq initialization of removed per-task concurrent-time members
+  and their unused locks. Existing per-UID concurrent-time accounting remains.
 
 CI applies these fixes in both crDroid build modes and records them with the
 integration diff. Verified AOSP compiler archives are cached before kernel

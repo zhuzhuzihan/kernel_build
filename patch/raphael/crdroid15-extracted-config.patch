@@ -80,3 +80,46 @@ index d6bf94a..3fd5d71 100644
  #include "walt.h"
  
  const char *task_event_names[] = {"PUT_PREV_TASK", "PICK_NEXT_TASK",
+diff --git a/drivers/cpufreq/cpufreq_times.c b/drivers/cpufreq/cpufreq_times.c
+index 8d9cc58..c4519b0 100644
+--- a/drivers/cpufreq/cpufreq_times.c
++++ b/drivers/cpufreq/cpufreq_times.c
+@@ -31,10 +31,6 @@ static DECLARE_HASHTABLE(uid_hash_table, UID_HASH_BITS);
+ 
+ /* task->time_in_state */
+ static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(task_time_in_state_lock);
+-/* task->concurrent_active_time */
+-static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(task_concurrent_active_time_lock);
+-/* task->concurrent_policy_time */
+-static  __cacheline_aligned_in_smp DEFINE_SPINLOCK(task_concurrent_policy_time_lock);
+ /* uid_hash_table */
+ static __cacheline_aligned_in_smp DEFINE_SPINLOCK(uid_lock);
+ 
+@@ -327,14 +323,6 @@ void cpufreq_task_times_init(struct task_struct *p)
+ 	p->time_in_state = temp;
+ 	spin_unlock_irqrestore(&task_time_in_state_lock, flags);
+ 	p->max_state = max_state;
+-
+-	spin_lock_irqsave(&task_concurrent_active_time_lock, flags);
+-	p->concurrent_active_time = NULL;
+-	spin_unlock_irqrestore(&task_concurrent_active_time_lock, flags);
+-
+-	spin_lock_irqsave(&task_concurrent_policy_time_lock, flags);
+-	p->concurrent_policy_time = NULL;
+-	spin_unlock_irqrestore(&task_concurrent_policy_time_lock, flags);
+ }
+ 
+ /* Caller must hold task_time_in_state_lock */
+diff --git a/include/linux/cgroup_subsys.h b/include/linux/cgroup_subsys.h
+index 7366662..d99e801 100644
+--- a/include/linux/cgroup_subsys.h
++++ b/include/linux/cgroup_subsys.h
+@@ -21,7 +21,7 @@ SUBSYS(cpu)
+ SUBSYS(cpuacct)
+ #endif
+ 
+-#if IS_ENABLED(CONFIG_CGROUP_SCHEDTUNE) || IS_ENABLED(CONFIG_SCHED_TUNE_DUMMY)
++#if IS_ENABLED(CONFIG_SCHED_TUNE) || IS_ENABLED(CONFIG_SCHED_TUNE_DUMMY)
+ SUBSYS(schedtune)
+ #endif
+ 
