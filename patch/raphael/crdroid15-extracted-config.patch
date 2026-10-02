@@ -13,14 +13,70 @@ index e1df5af..43b1339 100644
  arm64-obj-$(CONFIG_HAVE_HW_BREAKPOINT)	+= hw_breakpoint.o
  arm64-obj-$(CONFIG_CPU_PM)		+= sleep.o suspend.o
  arm64-obj-$(CONFIG_CPU_IDLE)		+= cpuidle.o
+diff --git a/kernel/sched/tune.c b/kernel/sched/tune.c
+index b04122d..6c62069 100644
+--- a/kernel/sched/tune.c
++++ b/kernel/sched/tune.c
+@@ -575,6 +575,26 @@ int schedtune_prefer_idle(struct task_struct *p)
+ 	return prefer_idle;
+ }
+ 
++bool schedtune_task_colocated(struct task_struct *p)
++{
++#ifdef CONFIG_SCHED_WALT
++	struct schedtune *st;
++	bool colocate;
++
++	if (unlikely(!schedtune_initialized))
++		return false;
++
++	rcu_read_lock();
++	st = task_schedtune(p);
++	colocate = st->colocate;
++	rcu_read_unlock();
++
++	return colocate;
++#else
++	return false;
++#endif
++}
++
+ static u64
+ prefer_idle_read(struct cgroup_subsys_state *css, struct cftype *cft)
+ {
 diff --git a/kernel/sched/tune.h b/kernel/sched/tune.h
-index ec5e2bc..292b614 100644
+index ec5e2bc..3a97f99 100644
 --- a/kernel/sched/tune.h
 +++ b/kernel/sched/tune.h
-@@ -39,3 +39,6 @@ void schedtune_dequeue_task(struct task_struct *p, int cpu);
+@@ -16,6 +16,7 @@ int schedtune_cpu_boost(int cpu);
+ int schedtune_task_boost(struct task_struct *tsk);
+ 
+ int schedtune_prefer_idle(struct task_struct *tsk);
++bool schedtune_task_colocated(struct task_struct *tsk);
+ 
+ void schedtune_enqueue_task(struct task_struct *p, int cpu);
+ void schedtune_dequeue_task(struct task_struct *p, int cpu);
+@@ -35,7 +36,11 @@ void schedtune_dequeue_task(struct task_struct *p, int cpu);
+ #define schedtune_prefer_idle(tsk) 0
+ #endif
+ 
++#define schedtune_task_colocated(tsk) false
+ #define schedtune_enqueue_task(task, cpu) do { } while (0)
  #define schedtune_dequeue_task(task, cpu) do { } while (0)
  
  #endif /* CONFIG_SCHED_TUNE */
 +
 +/* Prefer faster CPUs for tasks with a positive boost. */
 +#define schedtune_prefer_high_cap(tsk) (schedtune_task_boost(tsk) > 0)
+diff --git a/kernel/sched/walt.c b/kernel/sched/walt.c
+index d6bf94a..3fd5d71 100644
+--- a/kernel/sched/walt.c
++++ b/kernel/sched/walt.c
+@@ -26,6 +26,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/sched/stat.h>
+ #include "sched.h"
++#include "tune.h"
+ #include "walt.h"
+ 
+ const char *task_event_names[] = {"PUT_PREV_TASK", "PICK_NEXT_TASK",

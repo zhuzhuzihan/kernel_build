@@ -51,6 +51,8 @@ configuration's tracing and SchedTune options.
 - Supplies the missing `schedtune_prefer_high_cap` helper using the existing
   positive per-task boost policy, matching the CPU-selection code's intent.
   The extracted configuration's `SCHED_TUNE=y` remains enabled.
+- Restores the WALT `schedtune_task_colocated` accessor by reading the existing
+  cgroup colocation flag under RCU, and includes its declaration in WALT.
 
 CI applies these fixes in both crDroid build modes and records them with the
 integration diff. Verified AOSP compiler archives are cached before kernel
