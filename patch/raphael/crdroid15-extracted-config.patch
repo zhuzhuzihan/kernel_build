@@ -123,3 +123,30 @@ index 7366662..d99e801 100644
  SUBSYS(schedtune)
  #endif
  
+diff --git a/include/linux/sched/core_ctl.h b/include/linux/sched/core_ctl.h
+index 281b852..ca4f2dd 100644
+--- a/include/linux/sched/core_ctl.h
++++ b/include/linux/sched/core_ctl.h
+@@ -14,6 +14,8 @@
+ #ifndef __CORE_CTL_H
+ #define __CORE_CTL_H
+ 
++#include <linux/sched/sysctl.h>
++
+ struct core_ctl_notif_data {
+ 	unsigned int nr_big;
+ 	unsigned int coloc_load_pct;
+diff --git a/kernel/sched/core_ctl.c b/kernel/sched/core_ctl.c
+index c415761..1623ca3 100644
+--- a/kernel/sched/core_ctl.c
++++ b/kernel/sched/core_ctl.c
+@@ -20,6 +20,9 @@
+ #include "sched.h"
+ #include "walt.h"
+ 
++#define MAX_CPUS_PER_CLUSTER 6
++#define MAX_NR_HISTORY_COUNT	2
++
+ struct cluster_data {
+ 	bool inited;
+ 	unsigned int min_cpus;

@@ -57,6 +57,9 @@ configuration's tracing and SchedTune options.
   compile its implementation, instead of the obsolete `CGROUP_SCHEDTUNE` name.
 - Removes cpufreq initialization of removed per-task concurrent-time members
   and their unused locks. Existing per-UID concurrent-time accounting remains.
+- Restores core_ctl's 6-CPU cluster and 2-window history limits, removed by
+  source commit `92671bd679eadc60966d6adb7371139eac618ddd`, and includes the
+  existing scheduler sysctl header for the shared 3-cluster limit.
 
 CI applies these fixes in both crDroid build modes and records them with the
 integration diff. Verified AOSP compiler archives are cached before kernel
