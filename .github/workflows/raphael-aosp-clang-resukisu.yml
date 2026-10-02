@@ -1,27 +1,12 @@
-name: Raphael Kernel Build (AOSP Clang 17 + Optional ReSukiSU)
+name: Raphael SM8150 Legacy Stock Build (AOSP Clang 17)
 
 on:
   workflow_dispatch:
     inputs:
       kernel_ref:
-        description: 'penglezos/kernel_xiaomi_raphael 分支、标签或提交'
+        description: 'xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150-legacy 分支、标签或提交'
         required: true
         default: 'lineage-20'
-        type: string
-      enable_resukisu:
-        description: '集成 ReSukiSU 并应用手动挂钩补丁'
-        required: false
-        default: false
-        type: boolean
-      resukisu_ref:
-        description: 'ReSukiSU 分支、标签或提交（启用时生效）'
-        required: false
-        default: 'main'
-        type: string
-      kernel_name:
-        description: '内核名称后缀（字母、数字、点、下划线或连字符）'
-        required: false
-        default: ''
         type: string
       upload_to_release:
         description: '上传到 Release'
@@ -38,9 +23,7 @@ env:
   CLANG_REVISION: clang-r487747c
   CLANG_COMMIT: 425c8149f17c8d9914bf690b4d5abe45a13fb993
   KERNEL_REF: ${{ inputs.kernel_ref }}
-  ENABLE_RESUKISU: ${{ inputs.enable_resukisu }}
-  RESUKISU_REF: ${{ inputs.resukisu_ref }}
-  KERNEL_NAME: ${{ inputs.kernel_name }}
+  KERNEL_REPOSITORY: xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150-legacy
   KBUILD_BUILD_USER: nobody
   KBUILD_BUILD_HOST: android-build
   KBUILD_BUILD_VERSION: '1'
@@ -58,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate build script syntax
-        run: bash -n scripts/build-raphael.sh
+        run: bash -n scripts/build-raphael-sm8150-legacy.sh
 
       - name: Free disk space
         run: |
@@ -105,45 +88,28 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: raphael-${{ inputs.kernel_ref }}-${{ inputs.enable_resukisu }}-clang-r487747c
+          key: raphael-sm8150-legacy-${{ inputs.kernel_ref }}-clang-r487747c
           max-size: 2G
 
       - name: Checkout raphael kernel source
+        id: kernel_source
         uses: actions/checkout@v4
         with:
-          repository: penglezos/kernel_xiaomi_raphael
+          repository: ${{ env.KERNEL_REPOSITORY }}
           ref: ${{ inputs.kernel_ref }}
           path: kernel
           fetch-depth: 1
 
-      - name: Apply Clang 17 compatibility patches
-        working-directory: kernel
-        run: |
-          git apply --verbose \
-            "$GITHUB_WORKSPACE/patch/raphael/clang17-fts-prototypes.patch" \
-            "$GITHUB_WORKSPACE/patch/raphael/clang17-vservices-unused-transport.patch" \
-            "$GITHUB_WORKSPACE/patch/raphael/clang17-gsi-genksyms.patch"
-
-      - name: Setup ReSukiSU and apply manual hooks
-        if: ${{ inputs.enable_resukisu }}
-        working-directory: kernel
-        run: |
-          curl --fail --location --retry 3 \
-            https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh \
-            --output "$RUNNER_TEMP/setup-resukisu.sh"
-          bash "$RUNNER_TEMP/setup-resukisu.sh" "$RESUKISU_REF"
-          test -f drivers/kernelsu/Kconfig
-          EXPECTED_COMMIT=$(git -C KernelSU rev-parse "${RESUKISU_REF}^{commit}")
-          test "$(git -C KernelSU rev-parse HEAD)" = "$EXPECTED_COMMIT"
-          git apply --verbose \
-            "$GITHUB_WORKSPACE/patch/raphael/resukisu-manual-hooks-4.14.patch"
-
-      - name: Validate GSI CRC and speaker ID symbols
-        run: bash scripts/build-raphael.sh --validate-link
-
-      - name: Configure and build kernel
+      - name: Configure and build unpatched kernel
         id: build_kernel
-        run: bash scripts/build-raphael.sh
+        run: bash scripts/build-raphael-sm8150-legacy.sh
+
+      - name: Verify source remains pristine
+        if: ${{ always() && steps.kernel_source.outcome == 'success' }}
+        working-directory: kernel
+        run: |
+          git diff --exit-code HEAD
+          git diff --cached --exit-code
 
       - name: Package AnyKernel3
         id: package
@@ -153,9 +119,9 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cp anykernel/raphael/anykernel.sh AnyKernel3/anykernel.sh
           cp artifacts/raphael/Image.gz AnyKernel3/Image.gz
-          KERNEL_STRING="Raphael $KERNEL_RELEASE (AOSP Clang 17.0.2)"
+          KERNEL_STRING="Raphael SM8150 legacy $KERNEL_RELEASE (AOSP Clang 17.0.2)"
           sed -i "s|@KERNEL_STRING@|$KERNEL_STRING|" AnyKernel3/anykernel.sh
-          PACKAGE_NAME="Raphael-${KERNEL_RELEASE}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          PACKAGE_NAME="Raphael-SM8150-Legacy-${KERNEL_RELEASE}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
           echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
           cd AnyKernel3
           zip -r9 "$GITHUB_WORKSPACE/artifacts/raphael/$PACKAGE_NAME.zip" . \
@@ -165,7 +131,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: raphael-kernel-${{ github.run_number }}
+          name: raphael-sm8150-legacy-${{ github.run_number }}
           path: artifacts/raphael/
           if-no-files-found: warn
           retention-days: 7
@@ -175,8 +141,8 @@ jobs:
         if: ${{ inputs.upload_to_release }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: raphael-${{ github.run_number }}-${{ github.run_attempt }}
-          name: Raphael ${{ steps.build_kernel.outputs.kernel_release }}
+          tag_name: raphael-sm8150-legacy-${{ github.run_number }}-${{ github.run_attempt }}
+          name: Raphael SM8150 legacy ${{ steps.build_kernel.outputs.kernel_release }}
           body_path: artifacts/raphael/build_info.txt
           files: |
             artifacts/raphael/Image.gz
@@ -192,15 +158,16 @@ jobs:
           PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
         run: |
           {
-            echo '## Raphael kernel build'
+            echo '## Raphael SM8150 legacy stock-source build'
             echo
             echo '| 项目 | 值 |'
             echo '|------|-----|'
             echo "| 构建状态 | $BUILD_STATUS |"
+            echo "| 源码仓库 | $KERNEL_REPOSITORY |"
             echo "| 源码 ref | $KERNEL_REF |"
             echo "| 内核版本 | $KERNEL_RELEASE |"
             echo '| 编译器 | AOSP Clang 17.0.2 / LLD 17.0.2, build 10087095 |'
-            echo '| 配置来源 | configs/raphael/boot.config |'
-            echo "| ReSukiSU | $ENABLE_RESUKISU |"
+            echo '| 配置来源 | configs/raphael/boot.config（提取的 IKCONFIG） |'
+            echo '| 源码补丁 | 无 |'
             echo "| AnyKernel3 | $PACKAGE_NAME.zip |"
           } >> "$GITHUB_STEP_SUMMARY"
