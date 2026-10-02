@@ -39,6 +39,12 @@ git -C "$kernel" diff --cached --exit-code
 cp "$workspace/configs/raphael/boot.config" "$out/.config"
 cp "$workspace/configs/raphael/boot.config" "$artifacts/boot.config"
 
+# Raphael selects the Xiaomi SM8150 and Xiaomi platform symbols through Kconfig.
+# The audio codecs also require the built-in Xiaomi speaker ID provider.
+"$kernel/scripts/config" --file "$out/.config" \
+  --enable MACH_XIAOMI_RAPHAEL \
+  --enable MFD_SPK_ID
+
 {
   printf 'Raphael SM8150 stock-source build\n'
   printf 'Source: https://github.com/%s\n' "$source_repo"
@@ -46,6 +52,7 @@ cp "$workspace/configs/raphael/boot.config" "$artifacts/boot.config"
   printf 'Source commit: %s\n' "$(git -C "$kernel" rev-parse HEAD)"
   printf 'Source patches: none\n'
   printf 'Configuration source: configs/raphael/boot.config (extracted IKCONFIG)\n'
+  printf 'Configuration overrides: MACH_XIAOMI_RAPHAEL=y MFD_SPK_ID=y\n'
   printf 'Configuration normalization: olddefconfig\n'
   printf 'Compiler: %s\n' "$(clang --version)"
   printf 'Linker: %s\n' "$(ld.lld --version)"
@@ -58,6 +65,17 @@ cp "$workspace/configs/raphael/boot.config" "$artifacts/boot.config"
 make -C "$kernel" "${make_args[@]}" olddefconfig \
   2>&1 | tee "$artifacts/configure.log"
 cp "$out/.config" "$artifacts/kernel.config"
+
+printf 'Required platform configuration after olddefconfig:\n' \
+  | tee "$artifacts/platform-config.log"
+for symbol in ARCH_SM8150 MACH_XIAOMI MACH_XIAOMI_SM8150 \
+  MACH_XIAOMI_RAPHAEL MFD_SPK_ID; do
+  grep -Fx "CONFIG_$symbol=y" "$out/.config" \
+    | tee -a "$artifacts/platform-config.log" || {
+      printf 'Required configuration is missing: CONFIG_%s=y\n' "$symbol" >&2
+      exit 1
+    }
+done
 
 make -C "$kernel" "${make_args[@]}" -j"$(nproc)" Image.gz \
   2>&1 | tee "$artifacts/build.log"
