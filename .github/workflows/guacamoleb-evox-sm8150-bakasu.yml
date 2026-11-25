@@ -1,0 +1,285 @@
+name: OnePlus 7 (guacamoleb) EvoX SM8150 Build (Official Clang per line + BakaSU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'EvoX 版本线：a16=11.x（官方 11.6.3 内核 ce1fce98，4.14.356-openela-rc1-perf），a15=10.x（官方 /15/ 内核时代 80bbe21c，4.14.356-openela-rc1）'
+        required: true
+        default: 'a16'
+        type: choice
+        options:
+          - a16
+          - a15
+      kernel_repository:
+        description: '内核仓库（owner/name），留空使用版本线默认仓库'
+        required: false
+        default: ''
+        type: string
+      kernel_ref:
+        description: '内核分支、标签或提交，留空使用版本线默认 ref'
+        required: false
+        default: ''
+        type: string
+      enable_bakasu:
+        description: '集成 BakaSU 手动钩子'
+        required: false
+        default: true
+        type: boolean
+      bakasu_ref:
+        description: 'BakaSU 分支、标签或提交（默认固定本轮验证提交）'
+        required: true
+        default: '57b2db6076f439cfd489f14576444e8f0f2f0a25'
+        type: string
+      upload_to_release:
+        description: '上传到 Release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  EVOX_ANDROID: ${{ inputs.android_version }}
+  KERNEL_REPOSITORY_INPUT: ${{ inputs.kernel_repository }}
+  KERNEL_REF_INPUT: ${{ inputs.kernel_ref }}
+  ENABLE_BAKASU: ${{ inputs.enable_bakasu }}
+  BAKASU_REF: ${{ inputs.bakasu_ref }}
+  KBUILD_BUILD_USER: build-user
+  KBUILD_BUILD_HOST: build-host
+  KBUILD_BUILD_VERSION: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Validate build script syntax
+        run: bash -n scripts/build-guacamoleb-sm8150.sh
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl flex git \
+            libelf-dev libncurses5 libncurses-dev libssl-dev python3 unzip zip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+
+      - name: Resolve per-line kernel and toolchain
+        id: resolve
+        run: |
+          # Kernel refs and compilers are pinned to the states the official
+          # Evolution X builds shipped (verified from the CDN boot.img
+          # banners + embedded IKCONFIG):
+          #   a15: /15/boot.img   = 4.14.356-openela-rc1-✨Caelum-OnePlus-7,
+          #       built 2025-06-04 with Android (12701618) clang 19.0.1
+          #       (based on r536225) -> clang-r536225 @ manifest_12701618
+          #       lives on android15-qpr2-release @ 96266255abde.
+          #   a16: /16/boot.img (11.6.3, 2026-04-15) =
+          #       4.14.356-openela-rc1-perf-gce1fce98e3f9, built with
+          #       Android (14054515) clang 21.0.0 (based on r563880c) ->
+          #       clang-r563880c @ manifest_14054515 lives on
+          #       android16-qpr2-release @ 9916fb51ccb9.
+          case "$EVOX_ANDROID" in
+            a15)
+              echo "kernel_repo=${KERNEL_REPOSITORY_INPUT:-Evolution-X-Devices/kernel_oneplus_sm8150}" >> "$GITHUB_OUTPUT"
+              echo "kernel_ref=${KERNEL_REF_INPUT:-80bbe21cceb928c95fcc7a7c7022f8070545c051}" >> "$GITHUB_OUTPUT"
+              echo "image_target=Image-dtb" >> "$GITHUB_OUTPUT"
+              echo "hook_patch=patch/guacamoleb/bakasu-manual-hooks-4.14.patch" >> "$GITHUB_OUTPUT"
+              echo "mode_uc=A15" >> "$GITHUB_OUTPUT"
+              echo "clang_revision=clang-r536225" >> "$GITHUB_OUTPUT"
+              echo "clang_commit=96266255abde" >> "$GITHUB_OUTPUT"
+              echo "clang_desc=AOSP Clang 19.0.1, build 12701618 (based on r536225)" >> "$GITHUB_OUTPUT"
+              ;;
+            a16)
+              echo "kernel_repo=${KERNEL_REPOSITORY_INPUT:-Evolution-X-Devices/kernel_oneplus_sm8150}" >> "$GITHUB_OUTPUT"
+              echo "kernel_ref=${KERNEL_REF_INPUT:-ce1fce98e3f97beb4a3379da3934d6136577e08a}" >> "$GITHUB_OUTPUT"
+              echo "image_target=Image" >> "$GITHUB_OUTPUT"
+              echo "hook_patch=patch/guacamoleb/bakasu-manual-hooks-4.14-evox-bka.patch" >> "$GITHUB_OUTPUT"
+              echo "mode_uc=A16" >> "$GITHUB_OUTPUT"
+              echo "clang_revision=clang-r563880c" >> "$GITHUB_OUTPUT"
+              echo "clang_commit=9916fb51ccb9" >> "$GITHUB_OUTPUT"
+              echo "clang_desc=AOSP Clang 21.0.0, build 14054515 (based on r563880c)" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::android_version must be a15 or a16"
+              exit 1
+              ;;
+          esac
+
+      - name: Cache AOSP Clang
+        id: cache_clang
+        uses: actions/cache@v4
+        with:
+          path: ~/aosp-clang/${{ steps.resolve.outputs.clang_revision }}
+          key: aosp-clang-${{ runner.os }}-${{ steps.resolve.outputs.clang_revision }}-${{ steps.resolve.outputs.clang_commit }}
+
+      - name: Download AOSP Clang for the selected EvoX line
+        if: steps.cache_clang.outputs.cache-hit != 'true'
+        env:
+          CLANG_REVISION: ${{ steps.resolve.outputs.clang_revision }}
+          CLANG_COMMIT: ${{ steps.resolve.outputs.clang_commit }}
+        run: |
+          TOOLCHAIN="$HOME/aosp-clang/$CLANG_REVISION"
+          mkdir -p "$TOOLCHAIN"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/$CLANG_COMMIT/$CLANG_REVISION.tar.gz" \
+            --output "$RUNNER_TEMP/aosp-clang.tar.gz"
+          tar -xzf "$RUNNER_TEMP/aosp-clang.tar.gz" -C "$TOOLCHAIN"
+          rm "$RUNNER_TEMP/aosp-clang.tar.gz"
+
+      - name: Configure toolchain environment
+        env:
+          CLANG_REVISION: ${{ steps.resolve.outputs.clang_revision }}
+        run: |
+          TOOLCHAIN="$HOME/aosp-clang/$CLANG_REVISION"
+          "$TOOLCHAIN/bin/clang" --version
+          "$TOOLCHAIN/bin/ld.lld" --version
+          echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: guacamoleb-sm8150-evox-${{ inputs.android_version }}-${{ steps.resolve.outputs.kernel_ref }}-${{ steps.resolve.outputs.clang_revision }}
+          max-size: 2G
+
+      - name: Checkout guacamoleb kernel source
+        id: kernel_source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.kernel_repo }}
+          ref: ${{ steps.resolve.outputs.kernel_ref }}
+          path: kernel
+          fetch-depth: 1
+
+      - name: Set up BakaSU and manual hooks
+        id: setup_bakasu
+        if: ${{ inputs.enable_bakasu }}
+        working-directory: kernel
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/guacamoleb"
+          git diff --exit-code HEAD
+          git diff --cached --exit-code
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/$BAKASU_REF/kernel/setup.sh" \
+            --output "$RUNNER_TEMP/setup-bakasu.sh"
+          bash "$RUNNER_TEMP/setup-bakasu.sh" "$BAKASU_REF" \
+            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/guacamoleb/bakasu-setup.log"
+          test "$(git -C KernelSU rev-parse HEAD)" = \
+            "$(git -C KernelSU rev-parse "$BAKASU_REF^{commit}")"
+          git apply --check "$GITHUB_WORKSPACE/${{ steps.resolve.outputs.hook_patch }}"
+          git apply "$GITHUB_WORKSPACE/${{ steps.resolve.outputs.hook_patch }}"
+          git diff --binary HEAD > "$GITHUB_WORKSPACE/artifacts/guacamoleb/kernel-source.patch"
+
+      - name: Configure and build kernel
+        id: build_kernel
+        env:
+          KERNEL_REPOSITORY: ${{ steps.resolve.outputs.kernel_repo }}
+          KERNEL_REF: ${{ steps.resolve.outputs.kernel_ref }}
+        run: bash scripts/build-guacamoleb-sm8150.sh
+
+      - name: Verify source matches intended integration
+        id: verify_source
+        if: ${{ always() && steps.kernel_source.outcome == 'success' && (!inputs.enable_bakasu || steps.setup_bakasu.outcome == 'success') }}
+        run: bash scripts/build-guacamoleb-sm8150.sh --verify-source
+
+      - name: Package AnyKernel3
+        id: package
+        env:
+          KERNEL_RELEASE: ${{ steps.build_kernel.outputs.kernel_release }}
+          IMAGE_TARGET: ${{ steps.resolve.outputs.image_target }}
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          cp anykernel/guacamoleb/anykernel.sh AnyKernel3/anykernel.sh
+          cp "artifacts/guacamoleb/$IMAGE_TARGET" "AnyKernel3/$IMAGE_TARGET"
+          KERNEL_STRING="OnePlus 7 (guacamoleb) SM8150 EvoX ${{ steps.resolve.outputs.mode_uc }} $KERNEL_RELEASE"
+          ROOT_SUFFIX=""
+          if [ "$ENABLE_BAKASU" = true ]; then
+            KERNEL_STRING="$KERNEL_STRING + BakaSU"
+            ROOT_SUFFIX="-BakaSU"
+          fi
+          sed -i "s|@KERNEL_STRING@|$KERNEL_STRING|" AnyKernel3/anykernel.sh
+          PACKAGE_NAME="OnePlus7-EvoX-${{ steps.resolve.outputs.mode_uc }}-${KERNEL_RELEASE}${ROOT_SUFFIX}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          cd AnyKernel3
+          zip -r9 "$GITHUB_WORKSPACE/artifacts/guacamoleb/$PACKAGE_NAME.zip" . \
+            -x '.git/*' '*.md' '*README*' '*.zip'
+
+      - name: Upload kernel artifacts and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guacamoleb-evox-${{ inputs.android_version }}-${{ github.run_number }}
+          path: artifacts/guacamoleb/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
+
+      - name: Create release
+        if: ${{ inputs.upload_to_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: guacamoleb-evox-${{ inputs.android_version }}-${{ github.run_number }}-${{ github.run_attempt }}
+          name: OnePlus 7 EvoX ${{ steps.resolve.outputs.mode_uc }} ${{ steps.build_kernel.outputs.kernel_release }}
+          body_path: artifacts/guacamoleb/build_info.txt
+          files: |
+            artifacts/guacamoleb/${{ steps.resolve.outputs.image_target }}
+            artifacts/guacamoleb/*.zip
+            artifacts/guacamoleb/kernel.config
+            artifacts/guacamoleb/build_info.txt
+            artifacts/guacamoleb/bakasu-symbols.log
+            artifacts/guacamoleb/kernel-source.patch
+
+      - name: Post build summary
+        if: always()
+        env:
+          BUILD_STATUS: ${{ job.status }}
+          KERNEL_RELEASE: ${{ steps.build_kernel.outputs.kernel_release }}
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+          SOURCE_CHECK_STATUS: ${{ steps.verify_source.outcome }}
+          KERNEL_REPO: ${{ steps.resolve.outputs.kernel_repo }}
+          KERNEL_REF: ${{ steps.resolve.outputs.kernel_ref }}
+          IMAGE_TARGET: ${{ steps.resolve.outputs.image_target }}
+          CLANG_DESC: ${{ steps.resolve.outputs.clang_desc }}
+        run: |
+          {
+            echo '## OnePlus 7 (guacamoleb) EvoX ${{ steps.resolve.outputs.mode_uc }} build'
+            echo
+            echo '| 项目 | 值 |'
+            echo '|------|-----|'
+            echo "| 构建状态 | $BUILD_STATUS |"
+            echo "| 目标 ROM | Evolution X ${{ steps.resolve.outputs.mode_uc }} |"
+            echo "| 源码仓库 | $KERNEL_REPO |"
+            echo "| 源码 ref | $KERNEL_REF |"
+            echo "| 内核版本 | $KERNEL_RELEASE |"
+            echo "| 编译器 | $CLANG_DESC（与官方 ROM 构建同版本） |"
+            echo '| 平台 | SM8150 (msmnile), 4.14 系，仅此平台可用 |'
+            echo "| 镜像产物 | $IMAGE_TARGET（A15=Image-dtb 含追加 DTB；A16=Image + 独立 DTB 段） |"
+            echo "| 源码检查 | $SOURCE_CHECK_STATUS |"
+            echo "| BakaSU | $ENABLE_BAKASU |"
+            if [ "$ENABLE_BAKASU" = true ]; then
+              echo "| BakaSU ref | $BAKASU_REF |"
+              echo '| 集成方式 | exec/stat/faccessat/reboot 手动钩子；input/setuid/init.rc 自动钩子 |'
+            else
+              echo '| 源码补丁 | 无 |'
+            fi
+            echo "| AnyKernel3 | $PACKAGE_NAME.zip |"
+            echo
+            echo '> 注意：A15 包与 A16 包的 boot 布局互不兼容（Image-dtb vs Image+独立 DTB），'
+            echo '> 刷入前务必选择与已安装 ROM 一致的版本线。'
+          } >> "$GITHUB_STEP_SUMMARY"

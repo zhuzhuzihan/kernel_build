@@ -64,10 +64,15 @@ and requires a defined absolute `__crc_gsi_write_channel_scratch` plus the
 and AnyKernel3 packaging. Validation logs and symbol tables are uploaded with
 the other build artifacts.
 
-ReSukiSU is optional and disabled by default. Enabling it installs the
-selected ReSukiSU ref, applies `patch/raphael/resukisu-manual-hooks-4.14.patch`,
-and enables manual hooks plus automatic input, setuid and init.rc hooks.
-`KALLSYMS_ALL` provides the SELinux static symbols required by the guide.
+BakaSU (formerly ReSukiSU) is optional and disabled by default. Enabling
+it installs the selected BakaSU ref from `Baka-SU/BakaSU`, applies
+`patch/raphael/bakasu-manual-hooks-4.14.patch`, and enables manual hooks
+plus automatic input, setuid and init.rc hooks. The patch follows the
+doc-recommended hook style: the execve pre-hook runs before the
+`IS_ERR(filename)` check and the post-hook runs at `out_ret:` inside
+`do_execveat_common`; the wrapper-rename variant is deprecated upstream.
+`KALLSYMS_ALL` provides the SELinux static symbols, so the static-export
+edits in the BakaSU guide are not required.
 
 Artifacts include `Image.gz`, the effective `kernel.config`, the original
 `boot.config`, build logs, build metadata and an AnyKernel3 ZIP. The ZIP
@@ -75,8 +80,9 @@ targets `raphael`/`raphaelin` and preserves the installed ramdisk and DTB.
 
 ## Run the workflow
 
-In GitHub Actions, select **Raphael Kernel Build (AOSP Clang 17 + Optional
-ReSukiSU)** and use **Run workflow**. Keep `kernel_ref=lineage-20` for the
-source used to prepare this patch. Enable `enable_resukisu` to include root
-support; `resukisu_ref` defaults to `main`. `kernel_name` adds a version suffix,
-and `upload_to_release` optionally publishes the successful build.
+In GitHub Actions, select **Raphael SM8150 Lineage 22.2 Build (AOSP Clang
+17 + BakaSU)** and use **Run workflow**. Keep `kernel_ref=lineage-22.2` for
+the source used to prepare this patch. Enable `enable_bakasu` to include
+root support; `bakasu_ref` defaults to the pinned `Baka-SU/BakaSU` commit
+`57b2db6076f439cfd489f14576444e8f0f2f0a25`. `kernel_name` adds a version
+suffix, and `upload_to_release` optionally publishes the successful build.

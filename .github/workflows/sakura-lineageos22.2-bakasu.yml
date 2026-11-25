@@ -1,4 +1,4 @@
-name: Kernel Build (lineage-22.2 + AOSP Clang + ReSukisu)
+name: Kernel Build (lineage-22.2 + AOSP Clang + BakaSU)
 
 on:
   workflow_dispatch:
@@ -84,10 +84,10 @@ jobs:
             ccache-kernel-${{ runner.os }}-
           save-always: true
 
-      - name: Apply KernelSU (KernelSU Next)
+      - name: Apply BakaSU (KernelSU fork)
         run: |
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+
       - name: Set environment
         run: |
           echo "PATH=$HOME/aosp-clang/clang-r450784d/bin:$PATH" >> $GITHUB_ENV

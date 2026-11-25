@@ -6,14 +6,15 @@
 - Successful stock-source baseline: `tmp/sm8150-lineage22-stock-ci`,
   build-repository commit `26984d692401abd57f87404c3ead187c8fc9c460`,
   [CI run 36953672838](https://github.com/zhuzhuzihan/kernel_build/actions/runs/36953672838).
-- ReSukiSU experiment branch: `tmp/sm8150-lineage22-resukisu-ci`.
+- BakaSU experiment branch: `tmp/sm8150-lineage22-resukisu-ci`
+  (branch name predates the ReSukiSU → BakaSU rename).
 - Compiler/linker: AOSP Clang/LLD 17.0.2, build 10087095.
 
 The workflow runs `scripts/build-raphael-sm8150.sh`. It seeds
 `kernel/out/.config` from the extracted IKCONFIG in
 `configs/raphael/boot.config`, enables `MACH_XIAOMI_RAPHAEL` and `MFD_SPK_ID`,
 runs `olddefconfig`, and builds `Image.gz`.
-With `enable_resukisu=false`, git diff checks before and after compilation
+With `enable_bakasu=false`, git diff checks before and after compilation
 verify that the tracked kernel source is pristine.
 
 The original extracted configuration does not enable the new source's Xiaomi
@@ -25,24 +26,36 @@ the initial stock-source test to fail during the final link.
 these effective platform/provider symbols before compilation and records them
 in `platform-config.log`.
 
-## ReSukiSU manual integration
+## BakaSU manual integration
 
-`enable_resukisu` defaults to `true` on the ReSukiSU experiment branch.
-`resukisu_ref` defaults to the pinned upstream commit
-`3a2745f78ab68e61c02a0681463021952083ec8c`. CI downloads the official setup
+BakaSU is ReSukiSU after its rename to `Baka-SU/BakaSU`; the Kconfig
+symbols, driver directory (`drivers/kernelsu`) and `KernelSU/` checkout
+name are unchanged, only the upstream URLs and branding moved.
+
+`enable_bakasu` defaults to `true` on the BakaSU experiment branch.
+`bakasu_ref` defaults to the pinned upstream commit
+`57b2db6076f439cfd489f14576444e8f0f2f0a25`. CI downloads the official setup
 script from the selected ref, runs it with that ref, and verifies the resulting
-ReSukiSU checkout before applying
-`patch/raphael/resukisu-manual-hooks-4.14.patch`.
+BakaSU checkout before applying
+`patch/raphael/bakasu-manual-hooks-4.14.patch`.
 
 The patch follows the upstream
-[manual integration guide](https://raw.githubusercontent.com/ReSukiSU/ReSukiSU.github.io/refs/heads/main/docs/zh-Hans/guide/manual-integrate.md):
+[manual integration guide](https://bakasu.org/guide/manual-integrate.html)
+in its recommended form:
 
-- `fs/exec.c`: wrap `do_execveat_common` with pre/post hooks. This source has
-  no `__do_execve_file` helper, so the original implementation is renamed
-  `__do_execveat_common`. Native and compat execve/execveat share this wrapper.
+- `fs/exec.c`: declare the hook functions before `do_execveat_common`, call
+  `ksu_handle_execveat` inside the function before the `IS_ERR(filename)`
+  check, and call `ksu_handle_post_execveat` at `out_ret:` before
+  `putname(filename)`. The older wrapper-rename variant
+  (`__do_execveat_common`) is deprecated upstream and is no longer used.
+  Native and compat execve/execveat share this function.
 - `fs/stat.c`: hook newfstatat/fstatat64 and newfstat/fstat64 returns.
 - `fs/open.c`: hook the 4.14 faccessat syscall.
 - `kernel/reboot.c`: hook reboot before the capability check.
+
+BakaSU verifies at build time (`kernel/tools/check_symbol`) that every hook
+symbol referenced by the driver is defined in `vmlinux`, so a missing hook
+patch fails the build instead of booting without root.
 
 The effective configuration must enable `KSU`, `KSU_MANUAL_HOOK`,
 `KSU_MANUAL_HOOK_AUTO_INPUT_HOOK`, `KSU_MANUAL_HOOK_AUTO_SETUID_HOOK`, and
@@ -51,7 +64,7 @@ input_handler/LSM integration for Linux 4.14. `KALLSYMS_ALL` supplies the
 SELinux static symbols. Tracepoint and SUSFS hook modes are disabled.
 
 CI records the driver-registration and hook changes in `kernel-source.patch`,
-checks that compilation does not change that snapshot or the ReSukiSU source,
+checks that compilation does not change that snapshot or the BakaSU source,
 and verifies all seven manual-hook provider symbols in the final `vmlinux`.
 The extracted `boot.config` is the configuration baseline for both modes;
 all overrides are applied to its copy in `kernel/out/.config`.
@@ -59,5 +72,5 @@ all overrides are applied to its copy in `kernel/out/.config`.
 Artifacts include the original extracted `boot.config`, effective
 `kernel.config`, configuration/build/platform logs, build metadata, and, on
 success, `Image.gz` and an AnyKernel3 ZIP for Raphael.
-ReSukiSU builds also include setup/configuration logs, `kernel-source.patch`,
-and `resukisu-symbols.log`; their AnyKernel3 ZIP name includes `ReSukiSU`.
+BakaSU builds also include setup/configuration logs, `kernel-source.patch`,
+and `bakasu-symbols.log`; their AnyKernel3 ZIP name includes `BakaSU`.

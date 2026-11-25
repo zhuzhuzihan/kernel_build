@@ -6,14 +6,14 @@ kernel="$workspace/kernel"
 out="$kernel/out"
 artifacts="$workspace/artifacts/raphael"
 source_repo="${KERNEL_REPOSITORY:-xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150}"
-enable_resukisu="${ENABLE_RESUKISU:-false}"
+enable_bakasu="${ENABLE_BAKASU:-false}"
 
 verify_source() {
-  if [[ "$enable_resukisu" == true ]]; then
+  if [[ "$enable_bakasu" == true ]]; then
     git -C "$kernel" diff --binary HEAD \
       | cmp - "$artifacts/kernel-source.patch"
     git -C "$kernel" apply --reverse --check \
-      "$workspace/patch/raphael/resukisu-manual-hooks-4.14.patch"
+      "$workspace/patch/raphael/bakasu-manual-hooks-4.14.patch"
     git -C "$kernel/KernelSU" diff --exit-code HEAD
     git -C "$kernel/KernelSU" diff --cached --exit-code
   else
@@ -71,7 +71,7 @@ cp "$workspace/configs/raphael/boot.config" "$artifacts/boot.config"
   --enable MACH_XIAOMI_RAPHAEL \
   --enable MFD_SPK_ID
 
-if [[ "$enable_resukisu" == true ]]; then
+if [[ "$enable_bakasu" == true ]]; then
   "$kernel/scripts/config" --file "$out/.config" \
     --enable KSU \
     --enable KSU_MANUAL_HOOK \
@@ -89,14 +89,14 @@ fi
   printf 'Source: https://github.com/%s\n' "$source_repo"
   printf 'Source ref: %s\n' "${KERNEL_REF:-lineage-22.2}"
   printf 'Source commit: %s\n' "$(git -C "$kernel" rev-parse HEAD)"
-  printf 'ReSukiSU enabled: %s\n' "$enable_resukisu"
-  if [[ "$enable_resukisu" == true ]]; then
-    printf 'ReSukiSU source: https://github.com/ReSukiSU/ReSukiSU\n'
-    printf 'ReSukiSU ref: %s\n' "$RESUKISU_REF"
-    printf 'ReSukiSU commit: %s\n' "$(git -C "$kernel/KernelSU" rev-parse HEAD)"
-    printf 'Source patches: ReSukiSU driver registration and manual hooks\n'
-    printf 'Hook patch: patch/raphael/resukisu-manual-hooks-4.14.patch\n'
-    printf 'ReSukiSU configuration: KSU=y KSU_MANUAL_HOOK=y; automatic input/setuid/init.rc hooks; KALLSYMS_ALL=y\n'
+  printf 'BakaSU enabled: %s\n' "$enable_bakasu"
+  if [[ "$enable_bakasu" == true ]]; then
+    printf 'BakaSU source: https://github.com/BakaSU/BakaSU\n'
+    printf 'BakaSU ref: %s\n' "$BAKASU_REF"
+    printf 'BakaSU commit: %s\n' "$(git -C "$kernel/KernelSU" rev-parse HEAD)"
+    printf 'Source patches: BakaSU driver registration and manual hooks\n'
+    printf 'Hook patch: patch/raphael/bakasu-manual-hooks-4.14.patch\n'
+    printf 'BakaSU configuration: KSU=y KSU_MANUAL_HOOK=y; automatic input/setuid/init.rc hooks; KALLSYMS_ALL=y\n'
   else
     printf 'Source patches: none\n'
   fi
@@ -126,14 +126,14 @@ for symbol in ARCH_SM8150 MACH_XIAOMI MACH_XIAOMI_SM8150 \
     }
 done
 
-if [[ "$enable_resukisu" == true ]]; then
-  printf 'Required ReSukiSU configuration after olddefconfig:\n' \
-    | tee "$artifacts/resukisu-config.log"
+if [[ "$enable_bakasu" == true ]]; then
+  printf 'Required BakaSU configuration after olddefconfig:\n' \
+    | tee "$artifacts/bakasu-config.log"
   for symbol in KSU KSU_MANUAL_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
     KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
     KALLSYMS KALLSYMS_ALL COMPAT SECURITY SECURITY_SELINUX INPUT; do
     grep -Fx "CONFIG_$symbol=y" "$out/.config" \
-      | tee -a "$artifacts/resukisu-config.log" || {
+      | tee -a "$artifacts/bakasu-config.log" || {
         printf 'Required configuration is missing: CONFIG_%s=y\n' "$symbol" >&2
         exit 1
       }
@@ -149,15 +149,15 @@ fi
 make -C "$kernel" "${make_args[@]}" -j"$(nproc)" Image.gz \
   2>&1 | tee "$artifacts/build.log"
 
-if [[ "$enable_resukisu" == true ]]; then
+if [[ "$enable_bakasu" == true ]]; then
   llvm-nm --defined-only "$out/vmlinux" \
     | grep -E '[[:space:]][Tt][[:space:]]+ksu_handle_(execveat|post_execveat|stat|newfstat_ret|fstat64_ret|faccessat|sys_reboot)$' \
-    | tee "$artifacts/resukisu-symbols.log"
+    | tee "$artifacts/bakasu-symbols.log"
   for symbol in ksu_handle_execveat ksu_handle_post_execveat ksu_handle_stat \
     ksu_handle_newfstat_ret ksu_handle_fstat64_ret ksu_handle_faccessat \
     ksu_handle_sys_reboot; do
-    grep -Eq "[[:space:]][Tt][[:space:]]+$symbol$" "$artifacts/resukisu-symbols.log" || {
-      printf 'Linked ReSukiSU hook symbol is missing: %s\n' "$symbol" >&2
+    grep -Eq "[[:space:]][Tt][[:space:]]+$symbol$" "$artifacts/bakasu-symbols.log" || {
+      printf 'Linked BakaSU hook symbol is missing: %s\n' "$symbol" >&2
       exit 1
     }
   done

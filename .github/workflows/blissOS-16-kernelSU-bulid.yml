@@ -156,7 +156,7 @@ jobs:
       - name: Setup KernelSU
         if: ${{ env.KERNELSU == 'true' }}
         run: |
-          echo "=== 集成 ReSukiSU ==="
+          echo "=== 集成 BakaSU ==="
           cd kernel
           
           # 删除内核仓库自带的 KernelSU 文件夹
@@ -165,15 +165,15 @@ jobs:
             rm -rf KernelSU
           fi
           
-          # 下载并运行 ReSukiSU setup 脚本
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          # 下载并运行 BakaSU setup 脚本
+          curl -LSs "https://raw.githubusercontent.com/BakaSU/BakaSU/main/kernel/setup.sh" | bash
           
           # 检查是否成功
           if [ -d "drivers/kernelsu" ]; then
-            echo "ReSukiSU 集成成功"
+            echo "BakaSU 集成成功"
             ls -la drivers/kernelsu/
           else
-            echo "ReSukiSU 集成失败"
+            echo "BakaSU 集成失败"
             exit 1
           fi
 

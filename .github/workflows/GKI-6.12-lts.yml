@@ -22,8 +22,8 @@ on:
           - thin
           - full
           - none
-      enable_resukisu:
-        description: 'Enable ReSukiSU support'
+      enable_bakasu:
+        description: 'Enable BakaSU support'
         required: false
         default: false
         type: boolean
@@ -41,7 +41,7 @@ on:
 env:
   TARGET_ARCH: ${{ github.event.inputs.arch || 'arm64' }}
   LTO_CONFIG: ${{ github.event.inputs.build_lto || 'default' }}
-  ENABLE_RESUKISU: ${{ github.event.inputs.enable_resukisu || 'false' }}
+  ENABLE_BAKASU: ${{ github.event.inputs.enable_bakasu || 'false' }}
   KERNEL_NAME: ${{ github.event.inputs.kernel_name || '' }}
 
 jobs:
@@ -91,8 +91,8 @@ jobs:
           if [ -n "${{ env.KERNEL_NAME }}" ]; then
             KERNEL_STRING="$KERNEL_STRING ${{ env.KERNEL_NAME }}"
           fi
-          if [ "${{ env.ENABLE_RESUKISU }}" = "true" ]; then
-            KERNEL_STRING="$KERNEL_STRING + ReSukiSU"
+          if [ "${{ env.ENABLE_BAKASU }}" = "true" ]; then
+            KERNEL_STRING="$KERNEL_STRING + BakaSU"
           fi
           
           # 创建 anykernel.sh 配置
@@ -142,31 +142,31 @@ jobs:
           echo "=== 查看可用的编译目标 ==="
           ./tools/bazel query "//common:*" 2>/dev/null | grep -E "kernel_" | head -20 || true
 
-      - name: Setup ReSukiSU
-        if: ${{ env.ENABLE_RESUKISU == 'true' }}
+      - name: Setup BakaSU
+        if: ${{ env.ENABLE_BAKASU == 'true' }}
         run: |
           cd gki/common
           
-          echo "=== 集成 ReSukiSU ==="
+          echo "=== 集成 BakaSU ==="
           
           # 删除原有的 KernelSU 目录（如果存在）
           rm -rf KernelSU 2>/dev/null || true
           
-          # 执行 ReSukiSU 安装脚本
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          # 执行 BakaSU 安装脚本
+          curl -LSs "https://raw.githubusercontent.com/BakaSU/BakaSU/main/kernel/setup.sh" | bash
           
           # 检查是否成功
           if [ -d "drivers/kernelsu" ]; then
-            echo "ReSukiSU 集成成功"
+            echo "BakaSU 集成成功"
             ls -la drivers/kernelsu/
           else
-            echo "::error::ReSukiSU 集成失败"
+            echo "::error::BakaSU 集成失败"
             exit 1
           fi
           
           # 提交更改（避免 dirty 标记）
           git add .
-          git commit -m "Add ReSukiSU support" || true
+          git commit -m "Add BakaSU support" || true
 
       - name: Build GKI kernel
         id: build_kernel
@@ -276,8 +276,8 @@ jobs:
           if [ -n "${{ env.KERNEL_NAME }}" ]; then
             ZIP_NAME="${ZIP_NAME}-${{ env.KERNEL_NAME }}"
           fi
-          if [ "${{ env.ENABLE_RESUKISU }}" = "true" ]; then
-            ZIP_NAME="${ZIP_NAME}-ReSukiSU"
+          if [ "${{ env.ENABLE_BAKASU }}" = "true" ]; then
+            ZIP_NAME="${ZIP_NAME}-BakaSU"
           fi
           
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
@@ -345,7 +345,7 @@ jobs:
           echo "Build: ${{ github.run_number }}" >> output/build_info.txt
           echo "Date: $(date)" >> output/build_info.txt
           echo "Kernel Name: ${{ env.KERNEL_NAME }}" >> output/build_info.txt
-          echo "ReSukiSU: ${{ env.ENABLE_RESUKISU }}" >> output/build_info.txt
+          echo "BakaSU: ${{ env.ENABLE_BAKASU }}" >> output/build_info.txt
           
           # 清理源码释放空间
           echo "=== 清理源码 ==="
@@ -389,5 +389,5 @@ jobs:
           echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
           echo "| 架构 | ${{ env.TARGET_ARCH }} |" >> $GITHUB_STEP_SUMMARY
           echo "| LTO | ${{ env.LTO_CONFIG }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ReSukiSU | ${{ env.ENABLE_RESUKISU }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| BakaSU | ${{ env.ENABLE_BAKASU }} |" >> $GITHUB_STEP_SUMMARY
           echo "| AnyKernel3 | ${{ steps.prepare_ak3.outputs.zip_name }}.zip |" >> $GITHUB_STEP_SUMMARY

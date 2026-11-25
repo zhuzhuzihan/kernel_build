@@ -12,7 +12,7 @@ extracted IKCONFIG in `configs/raphael/boot.config`. The workflow runs
 `kernel/out/.config`, runs `olddefconfig` against the new source, and builds
 `Image.gz`. It records the effective configuration and source commit. Git diff
 checks before and after compilation verify that the tracked kernel source is
-pristine. This experiment applies no source patches or ReSukiSU hooks.
+pristine. This experiment applies no source patches or BakaSU hooks.
 
 Artifacts include the original extracted `boot.config`, effective
 `kernel.config`, configuration/build logs, build metadata, and, on success,

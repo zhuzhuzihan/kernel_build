@@ -1,18 +1,8 @@
 diff --git a/fs/exec.c b/fs/exec.c
-index e8e592d20..528a1e6f7 100644
 --- a/fs/exec.c
 +++ b/fs/exec.c
-@@ -1693,7 +1693,7 @@ static int exec_binprm(struct linux_binprm *bprm)
- /*
-  * sys_execve() executes a new program.
-  */
--static int do_execveat_common(int fd, struct filename *filename,
-+static int __do_execveat_common(int fd, struct filename *filename,
- 			      struct user_arg_ptr argv,
- 			      struct user_arg_ptr envp,
- 			      int flags)
-@@ -1838,6 +1838,34 @@ static int do_execveat_common(int fd, struct filename *filename,
- 	return retval;
+@@ -1710,6 +1710,16 @@
+ 	return ret;
  }
  
 +#ifdef CONFIG_KSU_MANUAL_HOOK
@@ -25,32 +15,37 @@ index e8e592d20..528a1e6f7 100644
 +				  int *retval);
 +#endif
 +
-+static int do_execveat_common(int fd, struct filename *filename,
-+			     struct user_arg_ptr argv,
-+			     struct user_arg_ptr envp,
-+			     int flags)
-+{
+ /*
+  * sys_execve() executes a new program.
+  */
+@@ -1723,6 +1733,10 @@
+ 	struct file *file;
+ 	struct files_struct *displaced;
+ 	int retval;
++
 +#ifdef CONFIG_KSU_MANUAL_HOOK
-+	int retval;
-+
 +	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-+	retval = __do_execveat_common(fd, filename, argv, envp, flags);
-+	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags,
-+				&retval);
-+	return retval;
-+#else
-+	return __do_execveat_common(fd, filename, argv, envp, flags);
 +#endif
-+}
+ 
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+@@ -1871,6 +1885,11 @@
+ 	if (displaced)
+ 		reset_files_struct(displaced);
+ out_ret:
 +
- int do_execve(struct filename *filename,
- 	const char __user *const __user *__argv,
- 	const char __user *const __user *__envp)
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_post_execveat(&fd, &filename, &argv, &envp, &flags, &retval);
++#endif
++
+ 	putname(filename);
+ 	return retval;
+ }
+
 diff --git a/fs/open.c b/fs/open.c
-index 0628bd1ae..0a4e0c5ee 100644
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -354,6 +354,12 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
+@@ -354,6 +354,12 @@
  	return error;
  }
  
@@ -63,22 +58,22 @@ index 0628bd1ae..0a4e0c5ee 100644
  /*
   * access() needs to use the real uid/gid, not the effective uid/gid.
   * We do this by temporarily clearing all FS-related capabilities and
-@@ -369,6 +375,10 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+@@ -368,6 +374,10 @@
+ 	struct vfsmount *mnt;
  	int res;
  	unsigned int lookup_flags = LOOKUP_FOLLOW;
- 
++
 +#ifdef CONFIG_KSU_MANUAL_HOOK
 +	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
 +#endif
-+
+ 
  	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
  		return -EINVAL;
- 
+
 diff --git a/fs/stat.c b/fs/stat.c
-index 873785dae..7da397af0 100644
 --- a/fs/stat.c
 +++ b/fs/stat.c
-@@ -354,6 +354,18 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+@@ -353,6 +353,19 @@
  	return cp_new_stat(&stat, statbuf);
  }
  
@@ -86,6 +81,7 @@ index 873785dae..7da397af0 100644
 +__attribute__((hot))
 +extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
 +			   int *flags);
++
 +extern void ksu_handle_newfstat_ret(unsigned int *fd,
 +				  struct stat __user **statbuf_ptr);
 +#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
@@ -97,7 +93,7 @@ index 873785dae..7da397af0 100644
  #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
  SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
  		struct stat __user *, statbuf, int, flag)
-@@ -361,6 +373,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+@@ -360,6 +373,9 @@
  	struct kstat stat;
  	int error;
  
@@ -107,7 +103,7 @@ index 873785dae..7da397af0 100644
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
  		return error;
-@@ -376,6 +391,9 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+@@ -375,6 +391,9 @@
  	if (!error)
  		error = cp_new_stat(&stat, statbuf);
  
@@ -117,7 +113,7 @@ index 873785dae..7da397af0 100644
  	return error;
  }
  
-@@ -496,6 +514,9 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+@@ -495,6 +514,9 @@
  	if (!error)
  		error = cp_new_stat64(&stat, statbuf);
  
@@ -127,7 +123,7 @@ index 873785dae..7da397af0 100644
  	return error;
  }
  
-@@ -505,6 +526,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+@@ -504,6 +526,9 @@
  	struct kstat stat;
  	int error;
  
@@ -137,11 +133,11 @@ index 873785dae..7da397af0 100644
  	error = vfs_fstatat(dfd, filename, &stat, flag);
  	if (error)
  		return error;
+
 diff --git a/kernel/reboot.c b/kernel/reboot.c
-index bd30a973f..377cbe436 100644
 --- a/kernel/reboot.c
 +++ b/kernel/reboot.c
-@@ -269,6 +269,11 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
+@@ -269,6 +269,11 @@
  
  static DEFINE_MUTEX(reboot_mutex);
  
@@ -153,7 +149,7 @@ index bd30a973f..377cbe436 100644
  /*
   * Reboot system call: for obvious reasons only root may call it,
   * and even root needs to set up some magic numbers in the registers
-@@ -284,6 +289,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+@@ -284,6 +289,9 @@
  	char buffer[256];
  	int ret = 0;
  

@@ -1,4 +1,4 @@
-name: Raphael SM8150 Lineage 22.2 Build (AOSP Clang 17 + ReSukiSU)
+name: Raphael SM8150 Lineage 22.2 Build (AOSP Clang 17 + BakaSU)
 
 on:
   workflow_dispatch:
@@ -8,15 +8,15 @@ on:
         required: true
         default: 'lineage-22.2'
         type: string
-      enable_resukisu:
-        description: '集成 ReSukiSU 手动钩子'
+      enable_bakasu:
+        description: '集成 BakaSU 手动钩子'
         required: false
         default: true
         type: boolean
-      resukisu_ref:
-        description: 'ReSukiSU 分支、标签或提交（默认固定本轮验证提交）'
+      bakasu_ref:
+        description: 'BakaSU 分支、标签或提交（默认固定本轮验证提交）'
         required: true
-        default: '3a2745f78ab68e61c02a0681463021952083ec8c'
+        default: '57b2db6076f439cfd489f14576444e8f0f2f0a25'
         type: string
       upload_to_release:
         description: '上传到 Release'
@@ -34,8 +34,8 @@ env:
   CLANG_COMMIT: 425c8149f17c8d9914bf690b4d5abe45a13fb993
   KERNEL_REF: ${{ inputs.kernel_ref }}
   KERNEL_REPOSITORY: xiaomi-sm8150-devs/android_kernel_xiaomi_sm8150
-  ENABLE_RESUKISU: ${{ inputs.enable_resukisu }}
-  RESUKISU_REF: ${{ inputs.resukisu_ref }}
+  ENABLE_BAKASU: ${{ inputs.enable_bakasu }}
+  BAKASU_REF: ${{ inputs.bakasu_ref }}
   KBUILD_BUILD_USER: nobody
   KBUILD_BUILD_HOST: android-build
   KBUILD_BUILD_VERSION: '1'
@@ -112,23 +112,23 @@ jobs:
           path: kernel
           fetch-depth: 1
 
-      - name: Set up ReSukiSU and manual hooks
-        id: setup_resukisu
-        if: ${{ inputs.enable_resukisu }}
+      - name: Set up BakaSU and manual hooks
+        id: setup_bakasu
+        if: ${{ inputs.enable_bakasu }}
         working-directory: kernel
         run: |
           mkdir -p "$GITHUB_WORKSPACE/artifacts/raphael"
           git diff --exit-code HEAD
           git diff --cached --exit-code
           curl --fail --location --retry 3 --retry-all-errors \
-            "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/$RESUKISU_REF/kernel/setup.sh" \
-            --output "$RUNNER_TEMP/setup-resukisu.sh"
-          bash "$RUNNER_TEMP/setup-resukisu.sh" "$RESUKISU_REF" \
-            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/raphael/resukisu-setup.log"
+            "https://raw.githubusercontent.com/Baka-SU/BakaSU/$BAKASU_REF/kernel/setup.sh" \
+            --output "$RUNNER_TEMP/setup-bakasu.sh"
+          bash "$RUNNER_TEMP/setup-bakasu.sh" "$BAKASU_REF" \
+            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/raphael/bakasu-setup.log"
           test "$(git -C KernelSU rev-parse HEAD)" = \
-            "$(git -C KernelSU rev-parse "$RESUKISU_REF^{commit}")"
-          git apply --check "$GITHUB_WORKSPACE/patch/raphael/resukisu-manual-hooks-4.14.patch"
-          git apply "$GITHUB_WORKSPACE/patch/raphael/resukisu-manual-hooks-4.14.patch"
+            "$(git -C KernelSU rev-parse "$BAKASU_REF^{commit}")"
+          git apply --check "$GITHUB_WORKSPACE/patch/raphael/bakasu-manual-hooks-4.14.patch"
+          git apply "$GITHUB_WORKSPACE/patch/raphael/bakasu-manual-hooks-4.14.patch"
           git diff --binary HEAD > "$GITHUB_WORKSPACE/artifacts/raphael/kernel-source.patch"
 
       - name: Configure and build kernel
@@ -137,7 +137,7 @@ jobs:
 
       - name: Verify source matches intended integration
         id: verify_source
-        if: ${{ always() && steps.kernel_source.outcome == 'success' && (!inputs.enable_resukisu || steps.setup_resukisu.outcome == 'success') }}
+        if: ${{ always() && steps.kernel_source.outcome == 'success' && (!inputs.enable_bakasu || steps.setup_bakasu.outcome == 'success') }}
         run: bash scripts/build-raphael-sm8150.sh --verify-source
 
       - name: Package AnyKernel3
@@ -150,9 +150,9 @@ jobs:
           cp artifacts/raphael/Image.gz AnyKernel3/Image.gz
           KERNEL_STRING="Raphael SM8150 $KERNEL_RELEASE (AOSP Clang 17.0.2)"
           ROOT_SUFFIX=""
-          if [ "$ENABLE_RESUKISU" = true ]; then
-            KERNEL_STRING="$KERNEL_STRING + ReSukiSU"
-            ROOT_SUFFIX="-ReSukiSU"
+          if [ "$ENABLE_BAKASU" = true ]; then
+            KERNEL_STRING="$KERNEL_STRING + BakaSU"
+            ROOT_SUFFIX="-BakaSU"
           fi
           sed -i "s|@KERNEL_STRING@|$KERNEL_STRING|" AnyKernel3/anykernel.sh
           PACKAGE_NAME="Raphael-SM8150-Lineage22-${KERNEL_RELEASE}${ROOT_SUFFIX}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
@@ -183,7 +183,7 @@ jobs:
             artifacts/raphael/*.zip
             artifacts/raphael/kernel.config
             artifacts/raphael/build_info.txt
-            artifacts/raphael/resukisu-symbols.log
+            artifacts/raphael/bakasu-symbols.log
             artifacts/raphael/kernel-source.patch
 
       - name: Post build summary
@@ -207,9 +207,9 @@ jobs:
             echo '| 配置来源 | configs/raphael/boot.config（提取的 IKCONFIG） |'
             echo '| 平台适配 | MACH_XIAOMI_RAPHAEL=y、MFD_SPK_ID=y，检查 Xiaomi/SM8150 依赖 |'
             echo "| 源码检查 | $SOURCE_CHECK_STATUS |"
-            echo "| ReSukiSU | $ENABLE_RESUKISU |"
-            if [ "$ENABLE_RESUKISU" = true ]; then
-              echo "| ReSukiSU ref | $RESUKISU_REF |"
+            echo "| BakaSU | $ENABLE_BAKASU |"
+            if [ "$ENABLE_BAKASU" = true ]; then
+              echo "| BakaSU ref | $BAKASU_REF |"
               echo '| 集成方式 | exec/stat/faccessat/reboot 手动钩子；input/setuid/init.rc 自动钩子 |'
             else
               echo '| 源码补丁 | 无 |'

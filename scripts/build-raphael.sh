@@ -5,7 +5,7 @@ workspace="${GITHUB_WORKSPACE:-$(pwd)}"
 kernel="$workspace/kernel"
 out="$kernel/out"
 artifacts="$workspace/artifacts/raphael"
-enable_resukisu="${ENABLE_RESUKISU:-false}"
+enable_bakasu="${ENABLE_BAKASU:-false}"
 kernel_name="${KERNEL_NAME:-}"
 mode="${1:-build}"
 
@@ -26,8 +26,8 @@ localversion='-englezos'
 if [[ -n "$kernel_name" ]]; then
   localversion+="-$kernel_name"
 fi
-if [[ "$enable_resukisu" == true ]]; then
-  localversion+='-ReSukiSU'
+if [[ "$enable_bakasu" == true ]]; then
+  localversion+='-BakaSU'
 fi
 
 mkdir -p "$out" "$artifacts"
@@ -78,7 +78,7 @@ config="$kernel/scripts/config"
   --enable KALLSYMS \
   --enable KALLSYMS_ALL
 
-if [[ "$enable_resukisu" == true ]]; then
+if [[ "$enable_bakasu" == true ]]; then
   "$config" --file "$out/.config" \
     --enable KSU \
     --enable KSU_MANUAL_HOOK \
@@ -100,9 +100,9 @@ fi
   printf 'Boot config header: Linux/arm64 4.14.170\n'
   printf 'Compiler: %s\n' "$(clang --version)"
   printf 'Linker: %s\n' "$(ld.lld --version)"
-  printf 'ReSukiSU enabled: %s\n' "$enable_resukisu"
-  if [[ "$enable_resukisu" == true ]]; then
-    printf 'ReSukiSU commit: %s\n' "$(git -C "$kernel/KernelSU" rev-parse HEAD)"
+  printf 'BakaSU enabled: %s\n' "$enable_bakasu"
+  if [[ "$enable_bakasu" == true ]]; then
+    printf 'BakaSU commit: %s\n' "$(git -C "$kernel/KernelSU" rev-parse HEAD)"
   fi
   printf 'Date: %s\n' "$(date -u +%FT%TZ)"
   printf 'Make arguments:'
@@ -119,7 +119,7 @@ grep -Fxq 'CONFIG_MFD_SPK_ID=y' "$out/.config" || {
   exit 1
 }
 
-if [[ "$enable_resukisu" == true ]]; then
+if [[ "$enable_bakasu" == true ]]; then
   for symbol in KSU KSU_MANUAL_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
     KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK KALLSYMS_ALL; do
     grep -Fxq "CONFIG_$symbol=y" "$out/.config" || {
