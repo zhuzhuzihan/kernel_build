@@ -128,6 +128,7 @@ jobs:
         with:
           path: ~/aosp-clang/${{ steps.resolve.outputs.clang_revision }}
           key: aosp-clang-${{ runner.os }}-${{ steps.resolve.outputs.clang_revision }}-${{ steps.resolve.outputs.clang_commit }}
+          save-always: true
 
       - name: Download AOSP Clang for the selected EvoX line
         if: steps.cache_clang.outputs.cache-hit != 'true'
@@ -135,13 +136,27 @@ jobs:
           CLANG_REVISION: ${{ steps.resolve.outputs.clang_revision }}
           CLANG_COMMIT: ${{ steps.resolve.outputs.clang_commit }}
         run: |
+          # googlesource +archive intermittently truncates large tarballs
+          # (server closes the stream early). Validate the gzip stream and
+          # retry; each attempt downloads the full archive again.
           TOOLCHAIN="$HOME/aosp-clang/$CLANG_REVISION"
           mkdir -p "$TOOLCHAIN"
-          curl --fail --location --retry 3 --retry-all-errors \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/$CLANG_COMMIT/$CLANG_REVISION.tar.gz" \
-            --output "$RUNNER_TEMP/aosp-clang.tar.gz"
-          tar -xzf "$RUNNER_TEMP/aosp-clang.tar.gz" -C "$TOOLCHAIN"
-          rm "$RUNNER_TEMP/aosp-clang.tar.gz"
+          for attempt in 1 2 3 4 5; do
+            rm -f "$RUNNER_TEMP/aosp-clang.tar.gz"
+            if curl --fail --location --retry 3 --retry-all-errors --max-time 1800 \
+              "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/$CLANG_COMMIT/$CLANG_REVISION.tar.gz" \
+              --output "$RUNNER_TEMP/aosp-clang.tar.gz" \
+            && tar -tzf "$RUNNER_TEMP/aosp-clang.tar.gz" > /dev/null 2>&1; then
+              tar -xzf "$RUNNER_TEMP/aosp-clang.tar.gz" -C "$TOOLCHAIN"
+              rm "$RUNNER_TEMP/aosp-clang.tar.gz"
+              echo "clang archive OK on attempt $attempt"
+              exit 0
+            fi
+            echo "::warning::clang archive truncated/unreachable (attempt $attempt), retrying"
+            sleep 20
+          done
+          echo "::error::clang archive failed after 5 attempts"
+          exit 1
 
       - name: Configure toolchain environment
         env:
