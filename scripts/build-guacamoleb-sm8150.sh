@@ -141,6 +141,13 @@ make_args=(
   # inert make variables kept for build parity with the ROM.
   CONFIG_INITRAMFS_IGNORE_SKIP_FLAG=y
   CONFIG_PROC_CMDLINE_APPEND_ANDROID_FORCE_NORMAL_BOOT=y
+  # The in-tree dtc (1.4.x) rejects the top-level `&label` overlay syntax in
+  # -O dtbo files (Image-dtb also compiles the full dtbo set via the dtbs
+  # prerequisite); the ROM build always overrides with an external modern
+  # dtc through DTC_EXT (scripts/Makefile.lib: DTC = $(DTC_EXT)). The
+  # workflow installs device-tree-compiler (dtc 1.6.1) for this. No-op for
+  # targets that never invoke dtc (A16 "Image").
+  DTC_EXT=/usr/bin/dtc
 )
 
 config_targets=("$base_defconfig")

@@ -75,7 +75,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            bc bison build-essential ccache cpio curl flex git \
+            bc bison build-essential ccache cpio curl device-tree-compiler flex git \
             libelf-dev libncurses5 libncurses-dev libssl-dev python3 unzip zip \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
